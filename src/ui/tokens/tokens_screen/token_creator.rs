@@ -1277,6 +1277,13 @@ impl TokensScreen {
         }
 
         let token_description = if !self.token_description_input.is_empty() {
+            let len = self.token_description_input.len();
+            if len < 3 || len > 100 {
+                return Err(
+                    "Token description must be either empty or between 3 and 100 characters long"
+                        .to_string(),
+                );
+            }
             Some(self.token_description_input.clone())
         } else {
             None

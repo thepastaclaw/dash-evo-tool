@@ -230,7 +230,8 @@ impl AddNewWalletScreen {
             }
 
             // Generate default wallet name if none provided
-            let wallet_alias = if self.alias_input.trim().is_empty() {
+            let trimmed_alias = self.alias_input.trim();
+            let wallet_alias = if trimmed_alias.is_empty() {
                 let existing_wallet_count = self
                     .app_context
                     .wallets
@@ -239,7 +240,7 @@ impl AddNewWalletScreen {
                     .unwrap_or(0);
                 format!("Wallet {}", existing_wallet_count + 1)
             } else {
-                self.alias_input.clone()
+                trimmed_alias.chars().take(64).collect()
             };
 
             let wallet = Wallet {
@@ -787,6 +788,24 @@ impl ScreenLike for AddNewWalletScreen {
                     ui.horizontal(|ui| {
                         ui.label("Wallet Name:");
                         ui.text_edit_singleline(&mut self.alias_input);
+                    });
+                    if self.alias_input.chars().count() > 64 {
+                        self.alias_input = self.alias_input.chars().take(64).collect();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Leave blank to use a default wallet name.")
+                                .weak()
+                                .size(12.0),
+                        );
+                        let char_count = self.alias_input.trim().chars().count();
+                        if char_count > 50 {
+                            ui.label(
+                                RichText::new(format!("{}/64", char_count))
+                                    .weak()
+                                    .size(12.0),
+                            );
+                        }
                     });
 
                     ui.add_space(10.0);

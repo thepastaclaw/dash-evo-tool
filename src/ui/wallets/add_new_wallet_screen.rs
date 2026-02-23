@@ -52,6 +52,31 @@ pub const DASH_BIP44_ACCOUNT_0_PATH_TESTNET: [ChildNumber; 3] = [
     ChildNumber::Hardened { index: 0 },
 ];
 
+const WALLET_ALIAS_MAX_CHARS: usize = 64;
+
+fn wallet_alias_validation_error(alias_input: &str) -> Option<String> {
+    if alias_input.is_empty() {
+        return None;
+    }
+
+    let trimmed = alias_input.trim();
+    if trimmed.is_empty() {
+        return Some(
+            "Wallet name cannot be only whitespace. Clear the field to use the default name."
+                .to_string(),
+        );
+    }
+
+    if trimmed.chars().count() > WALLET_ALIAS_MAX_CHARS {
+        return Some(format!(
+            "Wallet name must be {} characters or fewer.",
+            WALLET_ALIAS_MAX_CHARS
+        ));
+    }
+
+    None
+}
+
 /// Word count options for BIP39 mnemonic seed phrases
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WordCount {
@@ -230,11 +255,11 @@ impl AddNewWalletScreen {
             }
 
             // Generate default wallet name if none provided
-            let trimmed_alias = self.alias_input.trim();
-            if trimmed_alias.chars().count() > 64 {
-                return Err("Wallet name must be 64 characters or fewer.".to_string());
+            if let Some(error) = wallet_alias_validation_error(&self.alias_input) {
+                return Err(error);
             }
 
+            let trimmed_alias = self.alias_input.trim();
             let wallet_alias = if trimmed_alias.is_empty() {
                 let existing_wallet_count = self
                     .app_context
@@ -791,24 +816,28 @@ impl ScreenLike for AddNewWalletScreen {
 
                     ui.horizontal(|ui| {
                         ui.label("Wallet Name:");
-                        ui.add(egui::TextEdit::singleline(&mut self.alias_input).char_limit(64));
+                        ui.text_edit_singleline(&mut self.alias_input);
                     });
+                    let alias_validation_error = wallet_alias_validation_error(&self.alias_input);
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new("Leave blank to use a default wallet name.")
                                 .weak()
                                 .size(12.0),
                         );
-                        let raw_char_count = self.alias_input.chars().count();
                         let displayed_char_count = self.alias_input.trim().chars().count();
-                        if raw_char_count > 50 {
-                            ui.label(
-                                RichText::new(format!("{}/64", displayed_char_count))
-                                    .weak()
-                                    .size(12.0),
-                            );
-                        }
+                        ui.label(
+                            RichText::new(format!(
+                                "{}/{}",
+                                displayed_char_count, WALLET_ALIAS_MAX_CHARS
+                            ))
+                            .weak()
+                            .size(12.0),
+                        );
                     });
+                    if let Some(alias_validation_error) = alias_validation_error {
+                        ui.colored_label(DashColors::ERROR, alias_validation_error);
+                    }
 
                     ui.add_space(10.0);
                     ui.separator();

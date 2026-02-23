@@ -54,6 +54,8 @@ enum RefreshMode {
     CoreAndPlatformTerminal,
 }
 
+const WALLET_ALIAS_MAX_CHARS: usize = 64;
+
 impl RefreshMode {
     fn label(&self) -> &'static str {
         match self {
@@ -1466,7 +1468,6 @@ impl ScreenLike for WalletsBalancesScreen {
 
                         let text_edit = egui::TextEdit::singleline(&mut self.rename_input)
                             .hint_text("Enter wallet name")
-                            .char_limit(64)
                             .desired_width(250.0);
                         ui.add(text_edit);
 
@@ -1474,7 +1475,16 @@ impl ScreenLike for WalletsBalancesScreen {
 
                         ui.horizontal(|ui| {
                             if ui.button("Save").clicked() {
-                                if self.rename_input.chars().count() > 64 {
+                                let trimmed_alias = self.rename_input.trim();
+                                if trimmed_alias.is_empty() {
+                                    self.display_message(
+                                        "Wallet name cannot be empty or whitespace.",
+                                        MessageType::Error,
+                                    );
+                                    return;
+                                }
+
+                                if trimmed_alias.chars().count() > WALLET_ALIAS_MAX_CHARS {
                                     self.display_message(
                                         "Wallet name must be 64 characters or fewer.",
                                         MessageType::Error,
@@ -1485,7 +1495,7 @@ impl ScreenLike for WalletsBalancesScreen {
                                 // Handle HD wallet rename
                                 if let Some(selected_wallet) = &self.selected_wallet {
                                     let mut wallet = selected_wallet.write().unwrap();
-                                    wallet.alias = Some(self.rename_input.clone());
+                                    wallet.alias = Some(trimmed_alias.to_string());
 
                                     // Update the alias in the database
                                     let seed_hash = wallet.seed_hash();
@@ -1493,7 +1503,7 @@ impl ScreenLike for WalletsBalancesScreen {
                                         .db
                                         .set_wallet_alias(
                                             &seed_hash,
-                                            Some(self.rename_input.clone()),
+                                            Some(trimmed_alias.to_string()),
                                         )
                                         .ok();
                                 }
@@ -1502,7 +1512,7 @@ impl ScreenLike for WalletsBalancesScreen {
                                     &self.selected_single_key_wallet
                                 {
                                     let mut wallet = selected_sk_wallet.write().unwrap();
-                                    wallet.alias = Some(self.rename_input.clone());
+                                    wallet.alias = Some(trimmed_alias.to_string());
 
                                     // Update the alias in the database
                                     let key_hash = wallet.key_hash;
@@ -1510,7 +1520,7 @@ impl ScreenLike for WalletsBalancesScreen {
                                         .db
                                         .update_single_key_wallet_alias(
                                             &key_hash,
-                                            Some(&self.rename_input),
+                                            Some(trimmed_alias),
                                         )
                                         .ok();
                                 }

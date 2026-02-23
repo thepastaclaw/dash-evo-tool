@@ -1468,6 +1468,7 @@ impl ScreenLike for WalletsBalancesScreen {
 
                         let text_edit = egui::TextEdit::singleline(&mut self.rename_input)
                             .hint_text("Enter wallet name")
+                            .char_limit(WALLET_ALIAS_MAX_CHARS)
                             .desired_width(250.0);
                         ui.add(text_edit);
 

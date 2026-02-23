@@ -4,7 +4,7 @@ use rusqlite::{Connection, params};
 use std::fs;
 use std::path::Path;
 
-pub const DEFAULT_DB_VERSION: u16 = 27;
+pub const DEFAULT_DB_VERSION: u16 = 28;
 
 pub const DEFAULT_NETWORK: &str = "dash";
 
@@ -51,6 +51,9 @@ impl Database {
 
     fn apply_version_changes(&self, version: u16, tx: &Connection) -> rusqlite::Result<()> {
         match version {
+            28 => {
+                self.add_last_spv_active_column(tx)?;
+            }
             27 => {
                 self.add_network_indexes(tx)?;
             }
@@ -291,6 +294,7 @@ impl Database {
             user_mode TEXT DEFAULT 'Advanced',
             use_local_spv_node INTEGER DEFAULT 0,
             auto_start_spv INTEGER DEFAULT 0,
+            last_spv_active INTEGER DEFAULT 0,
             close_dash_qt_on_exit INTEGER DEFAULT 1,
             selected_wallet_hash BLOB,
             selected_single_key_hash BLOB

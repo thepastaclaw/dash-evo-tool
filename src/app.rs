@@ -685,18 +685,25 @@ impl AppState {
             app_state.welcome_screen =
                 Some(WelcomeScreen::new(app_state.mainnet_app_context.clone()));
         } else {
-            // Auto-start SPV sync if onboarding is completed, backend mode is SPV, auto-start is enabled,
-            // and developer mode is enabled.
+            // Auto-start SPV sync if onboarding is completed, backend mode is SPV, and developer mode is enabled.
+            // Start when user enabled auto-start OR SPV was active last session (restore-after-restart behavior).
             // TODO: SPV auto-start is gated behind developer mode while SPV is in development.
             // Remove the is_developer_mode() check once SPV is production-ready.
             let current_context = app_state.current_app_context();
             let auto_start_spv = db.get_auto_start_spv().unwrap_or(false);
-            if auto_start_spv
+            let last_spv_active = db.get_last_spv_active().unwrap_or(false);
+            if (auto_start_spv || last_spv_active)
                 && current_context.is_developer_mode()
                 && current_context.core_backend_mode() == crate::spv::CoreBackendMode::Spv
             {
                 if let Err(e) = current_context.start_spv() {
                     tracing::warn!("Failed to auto-start SPV sync: {}", e);
+                    if let Err(clear_err) = db.update_last_spv_active(false) {
+                        tracing::warn!(
+                            "Failed to clear last_spv_active after startup SPV auto-start failure: {}",
+                            clear_err
+                        );
+                    }
                 } else {
                     tracing::info!("SPV sync started automatically for {:?}", chosen_network);
                 }

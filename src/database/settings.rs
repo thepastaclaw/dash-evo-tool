@@ -326,6 +326,25 @@ impl Database {
         Ok(())
     }
 
+    /// Adds the last_spv_active column to the settings table.
+    pub fn add_last_spv_active_column(&self, conn: &rusqlite::Connection) -> Result<()> {
+        let column_exists: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('settings') WHERE name='last_spv_active'",
+            [],
+            |row| row.get::<_, i32>(0).map(|count| count > 0),
+        )?;
+
+        if !column_exists {
+            // Default to false - don't restore SPV unless it was active previously
+            conn.execute(
+                "ALTER TABLE settings ADD COLUMN last_spv_active INTEGER DEFAULT 0;",
+                (),
+            )?;
+        }
+
+        Ok(())
+    }
+
     /// Updates the use_local_spv_node flag in the settings table.
     pub fn update_use_local_spv_node(&self, use_local: bool) -> Result<()> {
         self.execute(
@@ -364,6 +383,26 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(result.unwrap_or(false)) // Default to false
+    }
+
+    /// Updates the last_spv_active flag in the settings table.
+    pub fn update_last_spv_active(&self, active: bool) -> Result<()> {
+        self.execute(
+            "UPDATE settings SET last_spv_active = ? WHERE id = 1",
+            rusqlite::params![active],
+        )?;
+        Ok(())
+    }
+
+    /// Gets the last_spv_active flag from the settings table.
+    pub fn get_last_spv_active(&self) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let result: Option<bool> = conn.query_row(
+            "SELECT last_spv_active FROM settings WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(result.unwrap_or(false))
     }
 
     /// Adds the close_dash_qt_on_exit column to the settings table.
@@ -415,6 +454,7 @@ impl Database {
         self.add_onboarding_columns(conn)?;
         self.add_use_local_spv_node_column(conn)?;
         self.add_auto_start_spv_column(conn)?;
+        self.add_last_spv_active_column(conn)?;
         self.add_close_dash_qt_on_exit_column(conn)?;
         self.add_selected_wallet_columns_if_missing(conn)?;
 
@@ -821,6 +861,63 @@ mod tests {
             .get_use_local_spv_node()
             .expect("Failed to get use_local_spv_node");
         assert!(use_local);
+
+        // Test last_spv_active (default false)
+        let last_spv_active = db
+            .get_last_spv_active()
+            .expect("Failed to get last_spv_active");
+        assert!(!last_spv_active);
+
+        db.update_last_spv_active(true)
+            .expect("Failed to update last_spv_active");
+        let last_spv_active = db
+            .get_last_spv_active()
+            .expect("Failed to get last_spv_active");
+        assert!(last_spv_active);
+    }
+
+    #[test]
+    fn test_add_last_spv_active_column_for_legacy_settings_table() {
+        let db = Database::new(":memory:").expect("Failed to create legacy test database");
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "CREATE TABLE settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                network TEXT NOT NULL,
+                start_root_screen INTEGER NOT NULL,
+                database_version INTEGER NOT NULL
+            )",
+            [],
+        )
+        .expect("Failed to create legacy settings table");
+        conn.execute(
+            "INSERT INTO settings (id, network, start_root_screen, database_version)
+             VALUES (1, 'dash', 20, 1)",
+            [],
+        )
+        .expect("Failed to insert legacy settings row");
+
+        db.add_last_spv_active_column(&conn)
+            .expect("Failed to add last_spv_active column");
+
+        let column_exists: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('settings') WHERE name='last_spv_active'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("Failed to query settings columns");
+        assert_eq!(column_exists, 1);
+
+        let persisted: i64 = conn
+            .query_row(
+                "SELECT last_spv_active FROM settings WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("Failed to read last_spv_active");
+        assert_eq!(persisted, 0);
     }
 
     #[test]

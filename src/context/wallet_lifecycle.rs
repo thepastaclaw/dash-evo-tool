@@ -47,6 +47,12 @@ impl AppContext {
         // Skip if SPV is already active — avoids orphaned listener tasks from
         // re-registering channels while existing handlers still hold old senders.
         if self.spv_manager.status().status.is_active() {
+            if let Err(e) = self.db.update_last_spv_active(true) {
+                tracing::warn!(
+                    "Failed to persist last_spv_active=true while SPV already active: {}",
+                    e
+                );
+            }
             return Ok(());
         }
 
@@ -77,6 +83,13 @@ impl AppContext {
         self.connection_status
             .set_spv_status(self.spv_manager.status().status);
         self.connection_status.refresh_overall();
+
+        if let Err(e) = self.db.update_last_spv_active(true) {
+            tracing::warn!(
+                "Failed to persist last_spv_active=true after starting SPV: {}",
+                e
+            );
+        }
         Ok(())
     }
 
@@ -782,5 +795,12 @@ impl AppContext {
         // Reset the throttle timer so trigger_refresh() starts polling
         // at 200ms intervals and picks up the Stopped transition quickly.
         self.connection_status.reset_timer();
+
+        if let Err(e) = self.db.update_last_spv_active(false) {
+            tracing::warn!(
+                "Failed to persist last_spv_active=false after stopping SPV: {}",
+                e
+            );
+        }
     }
 }

@@ -503,9 +503,6 @@ fn render_banner(
                 ui.label(egui::RichText::new(icon).color(fg_color).strong());
                 ui.add_space(Spacing::XS);
 
-                // Message text
-                ui.label(egui::RichText::new(text).color(fg_color));
-
                 // Right-aligned: annotation + dismiss
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("x").clicked() {
@@ -521,6 +518,11 @@ fn render_banner(
                     }
                 });
             });
+            ui.add_space(2.0);
+
+            // Keep message content on a dedicated wrapped row so long errors
+            // never push controls off-screen.
+            ui.add(egui::Label::new(egui::RichText::new(text).color(fg_color)).wrap());
 
             // Recovery suggestion (always visible, inline)
             if let Some(suggestion) = suggestion {

@@ -322,6 +322,49 @@ fn test_multiple_banners_render() {
     assert_eq!(harness.get_all_by_label("x").count(), 3);
 }
 
+/// Test that a long error message stays visible in a narrow panel and does not hide dismiss.
+#[test]
+fn test_long_error_text_keeps_dismiss_visible() {
+    let message_text = "Dash Core is offline and this is a long diagnostic message that should wrap within the banner without expanding layout width.";
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(280.0, 220.0))
+        .build_ui(|ui| {
+            MessageBanner::set_global(ui.ctx(), message_text, MessageType::Error);
+            MessageBanner::show_global(ui);
+        });
+    harness.run();
+    assert!(harness.query_by_label(message_text).is_some());
+    assert_eq!(harness.get_all_by_label("x").count(), 1);
+}
+
+/// Test that repeated long errors keep a stable count of dismiss buttons.
+#[test]
+fn test_repeated_long_errors_keep_dismiss_buttons() {
+    let messages = [
+        "Dash Core offline: retrying connection with a long description to force wrapping 1",
+        "Dash Core offline: retrying connection with a long description to force wrapping 2",
+        "Dash Core offline: retrying connection with a long description to force wrapping 3",
+        "Dash Core offline: retrying connection with a long description to force wrapping 4",
+        "Dash Core offline: retrying connection with a long description to force wrapping 5",
+    ];
+
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(280.0, 420.0))
+        .build_ui(|ui| {
+            for message in messages {
+                MessageBanner::set_global(ui.ctx(), message, MessageType::Error);
+            }
+            MessageBanner::show_global(ui);
+        });
+    harness.run();
+
+    for message in messages {
+        assert!(harness.query_by_label(message).is_some());
+    }
+    assert_eq!(harness.get_all_by_label("x").count(), 5);
+}
+
 /// Test BannerHandle::clear() removes the banner.
 #[test]
 fn test_handle_clear() {

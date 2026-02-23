@@ -12,6 +12,9 @@ use crate::ui::components::left_panel::add_left_panel;
 use crate::ui::components::styled::island_central_panel;
 use crate::ui::components::top_panel::add_top_panel;
 use crate::ui::components::{BannerHandle, MessageBanner};
+use crate::ui::helpers::{
+    DASH_CORE_CONNECTION_HELPER_TEXT, should_show_dash_core_connection_helper,
+};
 use crate::ui::identities::keys::add_key_screen::AddKeyScreen;
 use crate::ui::identities::keys::key_info_screen::KeyInfoScreen;
 use crate::ui::identities::register_dpns_name_screen::{
@@ -390,6 +393,10 @@ impl IdentitiesScreen {
                 ui.vertical_centered(|ui| {
                     // Heading
                     ui.add_space(5.0);
+                    if should_show_dash_core_connection_helper(&self.app_context) {
+                        ui.label(format!("({DASH_CORE_CONNECTION_HELPER_TEXT})"));
+                        ui.add_space(10.0);
+                    }
                     ui.label(
                         RichText::new("No Identities Loaded")
                             .strong()
@@ -423,16 +430,6 @@ impl IdentitiesScreen {
                     );
                     ui.add_space(1.0);
                     ui.label("• CREATE an Identity after creating or importing a wallet.");
-
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(10.0);
-
-                    // Footnote or extra info
-                    ui.label(
-                        "(Make sure Dash Core is running. You can check in the \
-                         network tab on the left.)",
-                    );
 
                     ui.add_space(5.0);
                 });

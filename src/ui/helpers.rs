@@ -20,6 +20,7 @@ use crate::{
     app::AppAction,
     context::AppContext,
     model::{qualified_contract::QualifiedContract, qualified_identity::QualifiedIdentity},
+    spv::CoreBackendMode,
     ui::contracts_documents::group_actions_screen::GroupActionsScreen,
     ui::theme::DashColors,
     ui::{RootScreenType, Screen, identities::keys::add_key_screen::AddKeyScreen},
@@ -51,6 +52,13 @@ use super::tokens::tokens_screen::IdentityTokenInfo;
 /// Layout of labels and buttons in the UI fails to vertically align properly containers that contain buttons and other items (labels, text fields, etc.).
 /// This constant provides a constant padding to be used in such cases to ensure proper alignment.
 pub const BUTTON_ADJUSTMENT_PADDING_TOP: f32 = 15.0;
+pub const DASH_CORE_CONNECTION_HELPER_TEXT: &str =
+    "Make sure Dash Core is running. You can check this in \"Settings\" on the left.";
+
+pub fn should_show_dash_core_connection_helper(app_context: &AppContext) -> bool {
+    let status = app_context.connection_status();
+    status.backend_mode() == CoreBackendMode::Rpc && !status.dash_core_connected()
+}
 
 /// Formats a key label for display in combo boxes and lists.
 /// Returns a string like "Key 0 | AUTHENTICATION | CRITICAL | ECDSA_SECP256K1"

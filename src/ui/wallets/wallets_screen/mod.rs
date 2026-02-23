@@ -16,7 +16,10 @@ use crate::ui::components::left_panel::add_left_panel;
 use crate::ui::components::styled::island_central_panel;
 use crate::ui::components::top_panel::add_top_panel;
 use crate::ui::components::wallet_unlock_popup::{WalletUnlockPopup, WalletUnlockResult};
-use crate::ui::helpers::copy_text_to_clipboard;
+use crate::ui::helpers::{
+    DASH_CORE_CONNECTION_HELPER_TEXT, copy_text_to_clipboard,
+    should_show_dash_core_connection_helper,
+};
 use crate::ui::theme::DashColors;
 use crate::ui::wallets::account_summary::{
     AccountCategory, AccountSummary, collect_account_summaries,
@@ -725,6 +728,10 @@ impl WalletsBalancesScreen {
                 ui.vertical_centered(|ui| {
                     // Heading
                     ui.add_space(5.0);
+                    if should_show_dash_core_connection_helper(&self.app_context) {
+                        ui.label(format!("({DASH_CORE_CONNECTION_HELPER_TEXT})"));
+                        ui.add_space(10.0);
+                    }
                     let dark_mode = ui.ctx().style().visuals.dark_mode;
                     ui.label(
                         RichText::new("No Wallets Loaded")
@@ -761,16 +768,6 @@ impl WalletsBalancesScreen {
                     ui.label(
                         "• CREATE a new Dash wallet by clicking \
                          on \"Create Wallet\".",
-                    );
-
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(10.0);
-
-                    // Footnote or extra info
-                    ui.label(
-                        "(Make sure Dash Core is running. You can check in the \
-                         network tab on the left.)",
                     );
 
                     ui.add_space(5.0);

@@ -157,6 +157,15 @@ impl ConnectionStatus {
         self.overall_connected.load(Ordering::Relaxed)
     }
 
+    /// Returns whether Dash Core connectivity requirements are satisfied in RPC mode.
+    /// This ignores DAPI availability and focuses only on Core RPC/ZMQ connectivity.
+    pub fn dash_core_connected(&self) -> bool {
+        if self.backend_mode() != CoreBackendMode::Rpc {
+            return false;
+        }
+        self.rpc_online() && (self.disable_zmq() || self.zmq_connected())
+    }
+
     pub fn refresh_overall(&self) {
         let backend_mode = self.backend_mode();
         let disable_zmq = self.disable_zmq();

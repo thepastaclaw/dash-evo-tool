@@ -18,6 +18,9 @@ pub use profile_search::ProfileSearchScreen;
 use crate::app::AppAction;
 use crate::context::AppContext;
 use crate::ui::ScreenType;
+use crate::ui::helpers::{
+    DASH_CORE_CONNECTION_HELPER_TEXT, should_show_dash_core_connection_helper,
+};
 use crate::ui::theme::DashColors;
 use chrono::{LocalResult, TimeZone, Utc};
 use chrono_humanize::HumanTime;
@@ -63,6 +66,10 @@ pub fn render_no_identities_card(ui: &mut Ui, app_context: &Arc<AppContext>) -> 
         .show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(5.0);
+                if should_show_dash_core_connection_helper(app_context) {
+                    ui.label(format!("({DASH_CORE_CONNECTION_HELPER_TEXT})"));
+                    ui.add_space(10.0);
+                }
                 ui.label(
                     RichText::new("No Identities Loaded")
                         .strong()
@@ -74,9 +81,7 @@ pub fn render_no_identities_card(ui: &mut Ui, app_context: &Arc<AppContext>) -> 
                 ui.separator();
                 ui.add_space(10.0);
 
-                ui.label(
-                    "To use DashPay features, you need to load or create an identity first.",
-                );
+                ui.label("To use DashPay features, you need to load or create an identity first.");
 
                 ui.add_space(10.0);
 
@@ -90,7 +95,9 @@ pub fn render_no_identities_card(ui: &mut Ui, app_context: &Arc<AppContext>) -> 
 
                 ui.label("• LOAD an existing identity by clicking the button below, or");
                 ui.add_space(1.0);
-                ui.label("• CREATE a new identity from the Identities screen after setting up a wallet.");
+                ui.label(
+                    "• CREATE a new identity from the Identities screen after setting up a wallet.",
+                );
 
                 ui.add_space(15.0);
 
@@ -107,14 +114,6 @@ pub fn render_no_identities_card(ui: &mut Ui, app_context: &Arc<AppContext>) -> 
                         ScreenType::AddExistingIdentity.create_screen(app_context),
                     );
                 }
-
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(10.0);
-
-                ui.label(
-                    "(Make sure Dash Core is running. You can check in the network tab on the left.)",
-                );
 
                 ui.add_space(5.0);
 

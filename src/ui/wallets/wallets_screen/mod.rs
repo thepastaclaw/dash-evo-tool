@@ -1466,6 +1466,7 @@ impl ScreenLike for WalletsBalancesScreen {
 
                         let text_edit = egui::TextEdit::singleline(&mut self.rename_input)
                             .hint_text("Enter wallet name")
+                            .char_limit(64)
                             .desired_width(250.0);
                         ui.add(text_edit);
 
@@ -1473,9 +1474,12 @@ impl ScreenLike for WalletsBalancesScreen {
 
                         ui.horizontal(|ui| {
                             if ui.button("Save").clicked() {
-                                // Limit the alias length to 64 characters
-                                if self.rename_input.len() > 64 {
-                                    self.rename_input.truncate(64);
+                                if self.rename_input.chars().count() > 64 {
+                                    self.display_message(
+                                        "Wallet name must be 64 characters or fewer.",
+                                        MessageType::Error,
+                                    );
+                                    return;
                                 }
 
                                 // Handle HD wallet rename

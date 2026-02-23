@@ -231,6 +231,10 @@ impl AddNewWalletScreen {
 
             // Generate default wallet name if none provided
             let trimmed_alias = self.alias_input.trim();
+            if trimmed_alias.chars().count() > 64 {
+                return Err("Wallet name must be 64 characters or fewer.".to_string());
+            }
+
             let wallet_alias = if trimmed_alias.is_empty() {
                 let existing_wallet_count = self
                     .app_context
@@ -240,7 +244,7 @@ impl AddNewWalletScreen {
                     .unwrap_or(0);
                 format!("Wallet {}", existing_wallet_count + 1)
             } else {
-                trimmed_alias.chars().take(64).collect()
+                trimmed_alias.to_string()
             };
 
             let wallet = Wallet {
@@ -787,21 +791,19 @@ impl ScreenLike for AddNewWalletScreen {
 
                     ui.horizontal(|ui| {
                         ui.label("Wallet Name:");
-                        ui.text_edit_singleline(&mut self.alias_input);
+                        ui.add(egui::TextEdit::singleline(&mut self.alias_input).char_limit(64));
                     });
-                    if self.alias_input.chars().count() > 64 {
-                        self.alias_input = self.alias_input.chars().take(64).collect();
-                    }
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new("Leave blank to use a default wallet name.")
                                 .weak()
                                 .size(12.0),
                         );
-                        let char_count = self.alias_input.trim().chars().count();
-                        if char_count > 50 {
+                        let raw_char_count = self.alias_input.chars().count();
+                        let displayed_char_count = self.alias_input.trim().chars().count();
+                        if raw_char_count > 50 {
                             ui.label(
-                                RichText::new(format!("{}/64", char_count))
+                                RichText::new(format!("{}/64", displayed_char_count))
                                     .weak()
                                     .size(12.0),
                             );

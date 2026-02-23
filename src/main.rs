@@ -48,7 +48,7 @@ async fn start(app_data_dir: &std::path::Path) -> Result<(), eframe::Error> {
     // Load icon for the window
     let icon_data = load_icon();
 
-    let native_options = eframe::NativeOptions {
+    let mut native_options = eframe::NativeOptions {
         persist_window: true, // Persist window size and position
         centered: true,       // Center window on startup if not maximized
         persistence_path: Some(app_data_dir.join("app.ron")),
@@ -57,6 +57,16 @@ async fn start(app_data_dir: &std::path::Path) -> Result<(), eframe::Error> {
             .with_app_id("org.dash.DashEvoTool"),
         ..Default::default()
     };
+
+    #[cfg(target_os = "macos")]
+    {
+        native_options.renderer = eframe::Renderer::Wgpu;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        native_options.renderer = eframe::Renderer::Glow;
+    }
 
     eframe::run_native(
         &format!("Dash Evo Tool v{}", VERSION),

@@ -22,7 +22,7 @@ use dash_sdk::dpp::key_wallet::bip32::{ExtendedPrivKey, ExtendedPubKey};
 use eframe::egui::{Context, TextureHandle, TextureOptions};
 use eframe::emath::Align;
 use egui::load::SizedTexture;
-use egui::{Color32, ComboBox, Frame, Grid, Layout, Margin, RichText, Stroke, Ui, Vec2};
+use egui::{Color32, ComboBox, Frame, Grid, Layout, Margin, RichText, Stroke, TextEdit, Ui, Vec2};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use tracing::error;
@@ -53,10 +53,18 @@ pub const DASH_BIP44_ACCOUNT_0_PATH_TESTNET: [ChildNumber; 3] = [
 ];
 
 const WALLET_ALIAS_MAX_CHARS: usize = 64;
+const WALLET_ALIAS_COUNTER_SHOW_THRESHOLD: usize = 50;
 
 fn wallet_alias_validation_error(alias_input: &str) -> Option<String> {
     if alias_input.is_empty() {
         return None;
+    }
+
+    if alias_input.chars().count() > WALLET_ALIAS_MAX_CHARS {
+        return Some(format!(
+            "Wallet name must be {} characters or fewer.",
+            WALLET_ALIAS_MAX_CHARS
+        ));
     }
 
     let trimmed = alias_input.trim();
@@ -65,13 +73,6 @@ fn wallet_alias_validation_error(alias_input: &str) -> Option<String> {
             "Wallet name cannot be only whitespace. Clear the field to use the default name."
                 .to_string(),
         );
-    }
-
-    if trimmed.chars().count() > WALLET_ALIAS_MAX_CHARS {
-        return Some(format!(
-            "Wallet name must be {} characters or fewer.",
-            WALLET_ALIAS_MAX_CHARS
-        ));
     }
 
     None
@@ -816,7 +817,10 @@ impl ScreenLike for AddNewWalletScreen {
 
                     ui.horizontal(|ui| {
                         ui.label("Wallet Name:");
-                        ui.text_edit_singleline(&mut self.alias_input);
+                        ui.add(
+                            TextEdit::singleline(&mut self.alias_input)
+                                .char_limit(WALLET_ALIAS_MAX_CHARS),
+                        );
                     });
                     let alias_validation_error = wallet_alias_validation_error(&self.alias_input);
                     ui.horizontal(|ui| {
@@ -825,15 +829,18 @@ impl ScreenLike for AddNewWalletScreen {
                                 .weak()
                                 .size(12.0),
                         );
+                        let raw_char_count = self.alias_input.chars().count();
                         let displayed_char_count = self.alias_input.trim().chars().count();
-                        ui.label(
-                            RichText::new(format!(
-                                "{}/{}",
-                                displayed_char_count, WALLET_ALIAS_MAX_CHARS
-                            ))
-                            .weak()
-                            .size(12.0),
-                        );
+                        if raw_char_count > WALLET_ALIAS_COUNTER_SHOW_THRESHOLD {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{}/{}",
+                                    displayed_char_count, WALLET_ALIAS_MAX_CHARS
+                                ))
+                                .weak()
+                                .size(12.0),
+                            );
+                        }
                     });
                     if let Some(alias_validation_error) = alias_validation_error {
                         ui.colored_label(DashColors::ERROR, alias_validation_error);

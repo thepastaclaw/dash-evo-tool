@@ -1107,10 +1107,15 @@ impl ScreenLike for AddNewIdentityScreen {
             // Only push when the message changes to avoid resetting the banner each frame
             // (e.g. try_open_wallet_no_password can re-set error_message every render pass).
             if self.error_message != self.last_global_error {
+                // Clear old banner first (if any) to prevent stale banners
+                // accumulating when the error message changes from one value
+                // to another (e.g. Some("A") → Some("B")).
+                if let Some(old) = self.last_global_error.as_ref() {
+                    MessageBanner::clear_global_message(ui.ctx(), old);
+                }
+                // Set new banner (if any)
                 if let Some(error_message) = self.error_message.as_ref() {
                     MessageBanner::set_global(ui.ctx(), error_message, MessageType::Error);
-                } else if let Some(old) = self.last_global_error.as_ref() {
-                    MessageBanner::clear_global_message(ui.ctx(), old);
                 }
                 self.last_global_error = self.error_message.clone();
             }

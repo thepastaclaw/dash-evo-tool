@@ -68,6 +68,7 @@ pub struct NetworkChooserScreen {
     pub recheck_time: Option<TimestampMillis>,
     custom_dash_qt_path: Option<PathBuf>,
     custom_dash_qt_error_message: Option<String>,
+    overwrite_dash_conf_error_message: Option<String>,
     overwrite_dash_conf: bool,
     disable_zmq: bool,
     developer_mode: bool,
@@ -167,6 +168,7 @@ impl NetworkChooserScreen {
             recheck_time: None,
             custom_dash_qt_path,
             custom_dash_qt_error_message: None,
+            overwrite_dash_conf_error_message: None,
             overwrite_dash_conf,
             disable_zmq,
             developer_mode,
@@ -910,7 +912,7 @@ impl NetworkChooserScreen {
                         }
                     }
 
-                    if self.custom_dash_qt_path.is_some() && ui.button("Clear").clicked() {
+                    if self.custom_dash_qt_path.as_ref().is_some_and(|p| !p.as_os_str().is_empty()) && ui.button("Clear").clicked() {
                         let previous_custom_dash_qt_path = self.custom_dash_qt_path.clone();
                         self.custom_dash_qt_path = Some(PathBuf::new());
                         self.custom_dash_qt_error_message = None;
@@ -973,10 +975,10 @@ impl NetworkChooserScreen {
                         .show(ui)
                         .clicked()
                     {
-                        self.custom_dash_qt_error_message = None;
+                        self.overwrite_dash_conf_error_message = None;
                         if let Err(e) = self.save() {
                             tracing::warn!("Failed to save overwrite_dash_conf setting: {}", e);
-                            self.custom_dash_qt_error_message = Some(
+                            self.overwrite_dash_conf_error_message = Some(
                                 "Failed to save overwrite dash.conf setting. Please try again."
                                     .to_string(),
                             );
@@ -989,6 +991,25 @@ impl NetworkChooserScreen {
                             .italics(),
                     );
                 });
+
+                if let Some(ref error) = self.overwrite_dash_conf_error_message {
+                    let error_color = Color32::from_rgb(255, 100, 100);
+                    let error = error.clone();
+                    Frame::new()
+                        .fill(error_color.gamma_multiply(0.1))
+                        .inner_margin(Margin::symmetric(10, 8))
+                        .corner_radius(5.0)
+                        .stroke(egui::Stroke::new(1.0, error_color))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&error).color(error_color));
+                                ui.add_space(10.0);
+                                if ui.small_button("Dismiss").clicked() {
+                                    self.overwrite_dash_conf_error_message = None;
+                                }
+                            });
+                        });
+                }
 
                 // Disable ZMQ toggle (requires restart)
                 ui.add_space(6.0);

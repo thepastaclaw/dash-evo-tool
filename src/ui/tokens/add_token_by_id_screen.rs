@@ -299,6 +299,30 @@ impl ScreenLike for AddTokenByIdScreen {
             ) => {
                 self.handle_fetched_contract(contract, Some(token_position));
             }
+            BackendTaskSuccessResult::ContractNotFound => {
+                // Contract ID lookup failed — fall back to interpreting the input
+                // as a Token ID on the next frame.
+                if Identifier::from_string(&self.contract_or_token_id_input, Encoding::Base58)
+                    .is_ok()
+                {
+                    self.try_token_id_next = true;
+                } else {
+                    MessageBanner::set_global(
+                        self.app_context.egui_ctx(),
+                        "Contract not found and input is not a valid identifier",
+                        MessageType::Error,
+                    );
+                    self.status = AddTokenStatus::Error;
+                }
+            }
+            BackendTaskSuccessResult::TokenNotFound => {
+                MessageBanner::set_global(
+                    self.app_context.egui_ctx(),
+                    "No contract or token found for the given identifier",
+                    MessageType::Error,
+                );
+                self.status = AddTokenStatus::Error;
+            }
             _ => {}
         }
     }

@@ -171,6 +171,31 @@ impl AppContext {
             ),
             DashPayTask::LoadPaymentHistory { identity } => {
                 let identity_id = identity.identity.id();
+
+                // Retroactively scan wallet transactions for DashPay payments
+                // that may not yet be in the dashpay_payments table.
+                if let Some(wallet_arc) = identity.associated_wallets.values().next()
+                    && let Ok(wallet_guard) = wallet_arc.read()
+                    && !wallet_guard.transactions.is_empty()
+                {
+                    match incoming_payments::scan_wallet_transactions_for_dashpay_payments(
+                        self,
+                        &identity_id,
+                        &wallet_guard.transactions,
+                    ) {
+                        Ok(n) if n > 0 => {
+                            tracing::info!(
+                                "Retroactively discovered {} DashPay payment(s) from wallet transactions",
+                                n
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("Wallet transaction scan failed: {}", e);
+                        }
+                        _ => {}
+                    }
+                }
+
                 let records = payments::load_payment_history(self, &identity_id, None).await?;
 
                 let network_str = self.network.to_string();

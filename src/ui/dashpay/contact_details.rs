@@ -90,6 +90,39 @@ impl ContactDetailsScreen {
         let identity_id = self.identity.identity.id();
         let network_str = self.app_context.network.to_string();
 
+        // Load payment history from database for this contact
+        self.payment_history.clear();
+        if let Ok(stored_payments) = self.app_context.db.load_payment_history(&identity_id, 100) {
+            let contact_bytes = self.contact_id.to_buffer().to_vec();
+            for sp in stored_payments {
+                // Only include payments involving this specific contact
+                let involves_contact =
+                    sp.from_identity_id == contact_bytes || sp.to_identity_id == contact_bytes;
+                if !involves_contact {
+                    continue;
+                }
+
+                let is_incoming = sp.to_identity_id == identity_id.to_buffer().to_vec();
+                let amount = if sp.amount < 0 {
+                    0u64
+                } else {
+                    sp.amount as u64
+                };
+
+                self.payment_history.push(Payment {
+                    tx_id: sp.tx_id,
+                    amount: Credits::from(amount),
+                    timestamp: if sp.created_at < 0 {
+                        0u64
+                    } else {
+                        sp.created_at as u64
+                    },
+                    is_incoming,
+                    memo: sp.memo,
+                });
+            }
+        }
+
         // Try to load the contact's public info from the dashpay_contacts table
         let mut username = None;
         let mut display_name = None;

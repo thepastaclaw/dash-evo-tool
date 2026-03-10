@@ -600,6 +600,48 @@ impl crate::database::Database {
         Ok(payments)
     }
 
+    /// Load payment history filtered to a specific contact relationship.
+    /// Returns payments where both identity_id and contact_id are involved
+    /// (either as sender or receiver), ordered by most recent first.
+    pub fn load_payment_history_for_contact(
+        &self,
+        identity_id: &Identifier,
+        contact_id: &Identifier,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<StoredPayment>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, tx_id, from_identity_id, to_identity_id, amount, memo,
+                    payment_type, status, created_at, confirmed_at
+             FROM dashpay_payments
+             WHERE (from_identity_id = ?1 OR to_identity_id = ?1)
+               AND (from_identity_id = ?2 OR to_identity_id = ?2)
+             ORDER BY created_at DESC
+             LIMIT ?3",
+        )?;
+
+        let identity_bytes = identity_id.to_buffer().to_vec();
+        let contact_bytes = contact_id.to_buffer().to_vec();
+        let payments = stmt
+            .query_map(params![identity_bytes, contact_bytes, limit], |row| {
+                Ok(StoredPayment {
+                    id: row.get(0)?,
+                    tx_id: row.get(1)?,
+                    from_identity_id: row.get(2)?,
+                    to_identity_id: row.get(3)?,
+                    amount: row.get(4)?,
+                    memo: row.get(5)?,
+                    payment_type: row.get(6)?,
+                    status: row.get(7)?,
+                    created_at: row.get(8)?,
+                    confirmed_at: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(payments)
+    }
+
     /// Delete all DashPay data for a specific identity
     pub fn delete_dashpay_data_for_identity(
         &self,

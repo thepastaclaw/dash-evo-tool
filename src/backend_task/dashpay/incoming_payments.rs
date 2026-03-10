@@ -407,15 +407,16 @@ pub fn scan_wallet_transactions_for_dashpay_payments(
 
             let addr_str = addr.to_string();
             if let Some((contact_id, address_index)) = address_map.get(&addr_str) {
-                let amount_duffs = output.value;
+                // The address_map contains receive-side addresses (addresses contacts
+                // use to pay us). For outgoing transactions, matching an output to
+                // these addresses does NOT reliably mean we sent to the contact —
+                // skip outgoing txs in the retroactive scan.
+                if !wtx.is_incoming() {
+                    continue;
+                }
 
-                // Determine direction: if the address belongs to us (owner == identity_id),
-                // this is an incoming payment from the contact.
-                let (from_id, to_id, payment_type) = if wtx.is_incoming() {
-                    (*contact_id, *identity_id, "received")
-                } else {
-                    (*identity_id, *contact_id, "sent")
-                };
+                let amount_duffs = output.value;
+                let (from_id, to_id, payment_type) = (*contact_id, *identity_id, "received");
 
                 if let Err(e) = app_context.db.save_payment(
                     &txid_str,
@@ -442,8 +443,8 @@ pub fn scan_wallet_transactions_for_dashpay_payments(
                     );
                 }
 
-                // Update highest receive index if incoming
-                if wtx.is_incoming() && *address_index > 0 {
+                // Update highest receive index
+                {
                     let _ = app_context.db.update_highest_receive_index(
                         identity_id,
                         contact_id,

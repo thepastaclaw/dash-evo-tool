@@ -779,41 +779,46 @@ impl AppContext {
                     .map_err(|e| e.to_string())?;
             }
 
-            if let Some(wref) = wallets_guard.get(seed_hash)
+            // Collect identity IDs and clone transactions while the write lock
+            // is held, then drop the lock before scanning to reduce contention.
+            let identity_ids: Vec<dash_sdk::platform::Identifier> = if let Some(wref) =
+                wallets_guard.get(seed_hash)
                 && let Ok(mut wallet) = wref.write()
                 && !wallet_transactions.is_empty()
             {
                 wallet.set_transactions(wallet_transactions.clone());
+                use dash_sdk::dpp::identity::accessors::IdentityGettersV0;
+                wallet.identities.values().map(|id| id.id()).collect()
+            } else {
+                vec![]
+            };
 
-                // Scan wallet transactions for DashPay payments and save any
-                // matches to the dashpay_payments table.  This bridges the gap
-                // between the SPV wallet (which knows about on-chain txs) and
-                // the DashPay payment history (which only knew about payments
-                // initiated through the app UI).
-                for identity in wallet.identities.values() {
-                    use dash_sdk::dpp::identity::accessors::IdentityGettersV0;
-                    let identity_id = identity.id();
-                    match crate::backend_task::dashpay::incoming_payments::scan_wallet_transactions_for_dashpay_payments(
-                        self,
-                        &identity_id,
-                        &wallet_transactions,
-                    ) {
-                        Ok(n) if n > 0 => {
-                            tracing::info!(
-                                identity = %identity_id,
-                                new_payments = n,
-                                "SPV reconcile: discovered DashPay payments from wallet transactions"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                identity = %identity_id,
-                                error = %e,
-                                "SPV reconcile: DashPay payment scan failed"
-                            );
-                        }
-                        _ => {}
+            // Scan wallet transactions for DashPay payments and save any
+            // matches to the dashpay_payments table.  This bridges the gap
+            // between the SPV wallet (which knows about on-chain txs) and
+            // the DashPay payment history (which only knew about payments
+            // initiated through the app UI).
+            for identity_id in &identity_ids {
+                match crate::backend_task::dashpay::incoming_payments::scan_wallet_transactions_for_dashpay_payments(
+                    self,
+                    identity_id,
+                    &wallet_transactions,
+                ) {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(
+                            identity = %identity_id,
+                            new_payments = n,
+                            "SPV reconcile: discovered DashPay payments from wallet transactions"
+                        );
                     }
+                    Err(e) => {
+                        tracing::debug!(
+                            identity = %identity_id,
+                            error = %e,
+                            "SPV reconcile: DashPay payment scan failed"
+                        );
+                    }
+                    _ => {}
                 }
             }
         }

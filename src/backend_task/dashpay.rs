@@ -174,14 +174,21 @@ impl AppContext {
 
                 // Retroactively scan wallet transactions for DashPay payments
                 // that may not yet be in the dashpay_payments table.
-                if let Some(wallet_arc) = identity.associated_wallets.values().next()
-                    && let Ok(wallet_guard) = wallet_arc.read()
-                    && !wallet_guard.transactions.is_empty()
-                {
+                // Clone transactions and drop the read lock before scanning
+                // to reduce lock contention.
+                let wallet_txs = identity
+                    .associated_wallets
+                    .values()
+                    .next()
+                    .and_then(|wallet_arc| wallet_arc.read().ok())
+                    .map(|guard| guard.transactions.clone())
+                    .unwrap_or_default();
+
+                if !wallet_txs.is_empty() {
                     match incoming_payments::scan_wallet_transactions_for_dashpay_payments(
                         self,
                         &identity_id,
-                        &wallet_guard.transactions,
+                        &wallet_txs,
                     ) {
                         Ok(n) if n > 0 => {
                             tracing::info!(

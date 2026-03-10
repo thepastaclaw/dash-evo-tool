@@ -12,7 +12,6 @@ use crate::ui::components::top_panel::add_top_panel;
 use crate::ui::dashpay::DashPaySubscreen;
 use crate::ui::theme::DashColors;
 use crate::ui::{MessageType, RootScreenType, ScreenLike, ScreenType};
-use dash_sdk::dpp::balances::credits::Credits;
 use dash_sdk::dpp::identity::accessors::IdentityGettersV0;
 use dash_sdk::platform::Identifier;
 use egui::{Color32, RichText, ScrollArea, TextEdit, Ui};
@@ -27,7 +26,8 @@ const PRIVATE_CONTACT_INFO_TEXT: &str = "About Private Contact Information:\n\n\
 #[derive(Debug, Clone)]
 pub struct Payment {
     pub tx_id: String,
-    pub amount: Credits,
+    /// Amount in duffs (1 Dash = 100_000_000 duffs)
+    pub amount: u64,
     pub timestamp: u64,
     pub is_incoming: bool,
     pub memo: Option<String>,
@@ -89,6 +89,35 @@ impl ContactDetailsScreen {
     fn load_from_database(&mut self) {
         let identity_id = self.identity.identity.id();
         let network_str = self.app_context.network.to_string();
+
+        // Load payment history from database for this contact
+        self.payment_history.clear();
+        if let Ok(stored_payments) = self.app_context.db.load_payment_history_for_contact(
+            &identity_id,
+            &self.contact_id,
+            1000,
+        ) {
+            for sp in stored_payments {
+                let is_incoming = sp.to_identity_id == identity_id.to_buffer().to_vec();
+                let amount = if sp.amount < 0 {
+                    0u64
+                } else {
+                    sp.amount as u64
+                };
+
+                self.payment_history.push(Payment {
+                    tx_id: sp.tx_id,
+                    amount,
+                    timestamp: if sp.created_at < 0 {
+                        0u64
+                    } else {
+                        sp.created_at as u64
+                    },
+                    is_incoming,
+                    memo: sp.memo,
+                });
+            }
+        }
 
         // Try to load the contact's public info from the dashpay_contacts table
         let mut username = None;
@@ -435,8 +464,9 @@ impl ContactDetailsScreen {
 
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
-                                        // Amount
-                                        let amount_str = format!("{} Dash", payment.amount);
+                                        // Amount (stored in duffs, display as Dash)
+                                        let dash_amount = payment.amount as f64 / 100_000_000.0;
+                                        let amount_str = format!("{:.8} Dash", dash_amount);
                                         if payment.is_incoming {
                                             ui.label(
                                                 RichText::new(format!("+{}", amount_str))

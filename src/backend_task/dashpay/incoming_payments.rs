@@ -282,6 +282,42 @@ pub fn match_transaction_to_contact(
         .map_err(|e| format!("Failed to lookup address: {}", e))
 }
 
+/// Record a single incoming DashPay payment in the database.
+///
+/// Saves the payment record and updates the highest receive index for the
+/// contact.  This is the shared core of [`process_incoming_payment`] (real-time
+/// SPV path) and [`scan_wallet_transactions_for_dashpay_payments`] (retroactive
+/// scan).
+fn record_incoming_payment(
+    app_context: &AppContext,
+    tx_id: &str,
+    owner_id: &Identifier,
+    contact_id: &Identifier,
+    amount_duffs: u64,
+    address_index: u32,
+) -> Result<(), String> {
+    app_context
+        .db
+        .save_payment(
+            tx_id,
+            contact_id, // from contact
+            owner_id,   // to us
+            amount_duffs as i64,
+            None, // memo — not available for incoming
+            "received",
+        )
+        .map_err(|e| format!("Failed to save payment: {}", e))?;
+
+    // update_highest_receive_index uses MAX() internally, so calling
+    // unconditionally is safe and idempotent.
+    app_context
+        .db
+        .update_highest_receive_index(owner_id, contact_id, address_index + 1)
+        .map_err(|e| format!("Failed to update receive index: {}", e))?;
+
+    Ok(())
+}
+
 /// Process an incoming transaction that was detected by SPV
 /// This should be called when WalletEvent::TransactionReceived is received
 pub async fn process_incoming_payment(
@@ -298,31 +334,15 @@ pub async fn process_incoming_payment(
 
     let (owner_id, contact_id, address_index) = mapping;
 
-    // Update the highest receive index if needed
-    let current_indices = app_context
-        .db
-        .get_contact_address_indices(&owner_id, &contact_id)
-        .map_err(|e| format!("Failed to get address indices: {}", e))?;
-
-    if address_index >= current_indices.highest_receive_index {
-        app_context
-            .db
-            .update_highest_receive_index(&owner_id, &contact_id, address_index + 1)
-            .map_err(|e| format!("Failed to update receive index: {}", e))?;
-    }
-
-    // Save the payment record
-    app_context
-        .db
-        .save_payment(
-            tx_id,
-            &contact_id, // from contact
-            &owner_id,   // to us
-            amount_duffs as i64,
-            None, // memo - not available for incoming
-            "received",
-        )
-        .map_err(|e| format!("Failed to save payment: {}", e))?;
+    // Record the payment and update address index
+    record_incoming_payment(
+        app_context,
+        tx_id,
+        &owner_id,
+        &contact_id,
+        amount_duffs,
+        address_index,
+    )?;
 
     Ok(Some(IncomingPaymentInfo {
         tx_id: tx_id.to_string(),
@@ -343,6 +363,123 @@ pub struct IncomingPaymentInfo {
     pub address: Address,
     pub amount_duffs: u64,
     pub address_index: u32,
+}
+
+/// Scan wallet transactions against DashPay address mappings and save any
+/// matched payments to the `dashpay_payments` table.
+///
+/// This is the retroactive counterpart of [`process_incoming_payment`]: it
+/// iterates over *all* wallet transactions (already synced via SPV) and checks
+/// every output address against the stored address-mapping table.  Payments
+/// that are already recorded (by tx_id) are skipped, so calling this function
+/// repeatedly is safe and idempotent.
+///
+/// It is designed to be called from:
+/// - the SPV reconcile flow (after wallet transactions are updated), and
+/// - the `LoadPaymentHistory` backend task (for immediate retroactive
+///   detection when the user opens the Payment History screen).
+pub fn scan_wallet_transactions_for_dashpay_payments(
+    app_context: &AppContext,
+    identity_id: &Identifier,
+    transactions: &[crate::model::wallet::WalletTransaction],
+) -> Result<usize, String> {
+    use dash_sdk::dpp::dashcore::Address;
+    use std::collections::HashSet;
+
+    // Build a lookup set of addresses → (owner_id, contact_id, address_index)
+    let mappings = app_context
+        .db
+        .get_all_dashpay_address_mappings(identity_id)
+        .map_err(|e| format!("Failed to load DashPay address mappings: {}", e))?;
+
+    if mappings.is_empty() {
+        return Ok(0);
+    }
+
+    // address string → (contact_id, address_index)
+    let address_map: std::collections::HashMap<String, (Identifier, u32)> = mappings
+        .into_iter()
+        .map(|(addr_str, contact_id, idx)| (addr_str, (contact_id, idx)))
+        .collect();
+
+    // Collect already-known tx_ids to avoid duplicates.
+    // We load up to 10,000 recent payments for client-side dedup; for identities
+    // with more history the DB's `tx_id UNIQUE` constraint provides server-side
+    // protection (at the cost of a benign constraint-violation log on collisions).
+    let existing_payments = app_context
+        .db
+        .load_payment_history(identity_id, 10_000)
+        .unwrap_or_default();
+    let known_tx_ids: HashSet<String> = existing_payments.iter().map(|p| p.tx_id.clone()).collect();
+
+    let network = app_context.network;
+    let mut saved = 0usize;
+
+    for wtx in transactions {
+        let txid_str = wtx.txid.to_string();
+        if known_tx_ids.contains(&txid_str) {
+            continue;
+        }
+
+        // Check every output for a matching DashPay address
+        for output in &wtx.transaction.output {
+            let addr = match Address::from_script(&output.script_pubkey, network) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+
+            let addr_str = addr.to_string();
+            if let Some((contact_id, address_index)) = address_map.get(&addr_str) {
+                // The address_map contains receive-side addresses (addresses contacts
+                // use to pay us). For outgoing transactions, matching an output to
+                // these addresses does NOT reliably mean we sent to the contact —
+                // skip outgoing txs in the retroactive scan.
+                if !wtx.is_incoming() {
+                    continue;
+                }
+
+                let amount_duffs = output.value;
+
+                if let Err(e) = record_incoming_payment(
+                    app_context,
+                    &txid_str,
+                    identity_id,
+                    contact_id,
+                    amount_duffs,
+                    *address_index,
+                ) {
+                    tracing::warn!(
+                        tx_id = %txid_str,
+                        error = %e,
+                        "Failed to save scanned DashPay payment"
+                    );
+                } else {
+                    saved += 1;
+                    tracing::info!(
+                        tx_id = %txid_str,
+                        contact = %contact_id.to_string(Encoding::Base58),
+                        amount = amount_duffs,
+                        direction = "received",
+                        address_index = address_index,
+                        "Saved DashPay payment from wallet transaction scan"
+                    );
+                }
+
+                // One match per transaction is enough (avoid double-counting)
+                break;
+            }
+        }
+    }
+
+    if saved > 0 {
+        tracing::info!(
+            identity = %identity_id.to_string(Encoding::Base58),
+            new_payments = saved,
+            "DashPay wallet transaction scan complete"
+        );
+    }
+
+    Ok(saved)
 }
 
 #[cfg(test)]

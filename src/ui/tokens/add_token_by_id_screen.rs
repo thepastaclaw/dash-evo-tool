@@ -48,6 +48,7 @@ pub struct AddTokenByIdScreen {
     selected_token: Option<TokenInfo>,
 
     try_token_id_next: bool,
+    tried_token_id_lookup: bool,
 }
 
 impl AddTokenByIdScreen {
@@ -59,6 +60,7 @@ impl AddTokenByIdScreen {
             status: AddTokenStatus::Idle,
             selected_token: None,
             try_token_id_next: false,
+            tried_token_id_lookup: false,
         }
     }
 
@@ -80,6 +82,7 @@ impl AddTokenByIdScreen {
         {
             let now = Utc::now().timestamp() as u32;
             self.status = AddTokenStatus::Searching(now);
+            self.tried_token_id_lookup = false;
 
             if !self.contract_or_token_id_input.is_empty() {
                 // Try to parse as identifier
@@ -183,6 +186,7 @@ impl AddTokenByIdScreen {
             self.fetched_contract = None;
             self.selected_token = None;
             self.try_token_id_next = false;
+            self.tried_token_id_lookup = false;
             return AppAction::None;
         }
 
@@ -301,15 +305,20 @@ impl ScreenLike for AddTokenByIdScreen {
             }
             BackendTaskSuccessResult::ContractNotFound => {
                 // Contract ID lookup failed — fall back to interpreting the input
-                // as a Token ID on the next frame.
-                if Identifier::from_string(&self.contract_or_token_id_input, Encoding::Base58)
-                    .is_ok()
+                // as a Token ID, but only on the first attempt. If we already
+                // tried token ID lookup and still got ContractNotFound (e.g. token
+                // was found but its contract fetch failed), treat it as an error
+                // to avoid an infinite loop.
+                if !self.tried_token_id_lookup
+                    && Identifier::from_string(&self.contract_or_token_id_input, Encoding::Base58)
+                        .is_ok()
                 {
                     self.try_token_id_next = true;
+                    self.tried_token_id_lookup = true;
                 } else {
                     MessageBanner::set_global(
                         self.app_context.egui_ctx(),
-                        "Contract not found and input is not a valid identifier",
+                        "No contract or token found for the given identifier",
                         MessageType::Error,
                     );
                     self.status = AddTokenStatus::Error;

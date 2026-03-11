@@ -176,15 +176,17 @@ impl AppContext {
                 // that may not yet be in the dashpay_payments table.
                 // Clone transactions and drop the read lock before scanning
                 // to reduce lock contention.
-                let wallet_txs = identity
-                    .associated_wallets
-                    .values()
-                    .next()
-                    .and_then(|wallet_arc| wallet_arc.read().ok())
-                    .map(|guard| guard.transactions.clone())
-                    .unwrap_or_default();
+                // Iterate all associated wallets — an identity can have multiple.
+                for wallet_arc in identity.associated_wallets.values() {
+                    let wallet_txs = match wallet_arc.read() {
+                        Ok(guard) => guard.transactions.clone(),
+                        Err(_) => continue,
+                    };
 
-                if !wallet_txs.is_empty() {
+                    if wallet_txs.is_empty() {
+                        continue;
+                    }
+
                     match incoming_payments::scan_wallet_transactions_for_dashpay_payments(
                         self,
                         &identity_id,

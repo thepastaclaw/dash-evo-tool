@@ -382,7 +382,10 @@ pub fn scan_wallet_transactions_for_dashpay_payments(
         .map(|(addr_str, contact_id, idx)| (addr_str, (contact_id, idx)))
         .collect();
 
-    // Collect already-known tx_ids to avoid duplicates
+    // Collect already-known tx_ids to avoid duplicates.
+    // We load up to 10,000 recent payments for client-side dedup; for identities
+    // with more history the DB's `tx_id UNIQUE` constraint provides server-side
+    // protection (at the cost of a benign constraint-violation log on collisions).
     let existing_payments = app_context
         .db
         .load_payment_history(identity_id, 10_000)

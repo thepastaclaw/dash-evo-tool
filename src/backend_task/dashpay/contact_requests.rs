@@ -184,7 +184,7 @@ pub async fn send_contact_request_with_proof(
     // Step 1: Resolve the recipient identity
     let to_identity = if to_username_or_id.ends_with(".dash") {
         // It's a complete username, resolve via DPNS
-        resolve_username_to_identity(sdk, &to_username_or_id).await?
+        resolve_username_to_identity(app_context, sdk, &to_username_or_id).await?
     } else {
         // Try to parse as identity ID first
         match Identifier::from_string_try_encodings(
@@ -201,7 +201,7 @@ pub async fn send_contact_request_with_proof(
             Err(_) => {
                 // Not a valid ID format, assume it's a username without .dash suffix
                 let username_with_suffix = format!("{}.dash", to_username_or_id);
-                resolve_username_to_identity(sdk, &username_with_suffix).await?
+                resolve_username_to_identity(app_context, sdk, &username_with_suffix).await?
             }
         }
     };
@@ -504,38 +504,64 @@ pub async fn send_contact_request_with_proof(
     ))
 }
 
-async fn resolve_username_to_identity(sdk: &Sdk, username: &str) -> Result<Identity, String> {
+async fn resolve_username_to_identity(
+    app_context: &Arc<AppContext>,
+    sdk: &Sdk,
+    username: &str,
+) -> Result<Identity, String> {
+    const MAX_RETRIES: u32 = 3;
+
     // Parse username (e.g., "alice.dash" -> "alice")
     let name = username
         .split('.')
         .next()
         .ok_or_else(|| format!("Invalid username format: {}", username))?;
 
-    // Query DPNS for the username
-    let dpns_contract_id = Identifier::from_string(
-        "GWRSAVFMjXx8HpQFaNJMqBV7MBgMK4br5UESsB4S31Ec",
-        Encoding::Base58,
-    )
-    .map_err(|e| format!("Failed to parse DPNS contract ID: {}", e))?;
+    // Use the cached DPNS contract from app context instead of fetching from network.
+    // This avoids "received height is outdated" errors when the server is behind.
+    let dpns_contract = app_context.dpns_contract.clone();
 
-    let dpns_contract = dash_sdk::platform::DataContract::fetch(sdk, dpns_contract_id)
-        .await
-        .map_err(|e| format!("Failed to fetch DPNS contract: {}", e))?
-        .ok_or("DPNS contract not found")?;
+    let mut retries = 0u32;
+    let results = loop {
+        let query = DocumentQuery::new(dpns_contract.clone(), "domain")
+            .map_err(|e| format!("Failed to create DPNS query: {}", e))?
+            .with_where(WhereClause {
+                field: "normalizedLabel".to_string(),
+                operator: WhereOperator::Equal,
+                value: Value::Text(name.to_lowercase()),
+            });
 
-    let mut query = DocumentQuery::new(Arc::new(dpns_contract), "domain")
-        .map_err(|e| format!("Failed to create DPNS query: {}", e))?;
-
-    query = query.with_where(WhereClause {
-        field: "normalizedLabel".to_string(),
-        operator: WhereOperator::Equal,
-        value: Value::Text(name.to_lowercase()),
-    });
-    query.limit = 1;
-
-    let results = Document::fetch_many(sdk, query)
-        .await
-        .map_err(|e| format!("Failed to query DPNS: {}", e))?;
+        match Document::fetch_many(sdk, query).await {
+            Ok(results) => break results,
+            Err(e) => {
+                let error_str = e.to_string();
+                if error_str.contains("try another server")
+                    || error_str.contains("height is outdated")
+                {
+                    retries += 1;
+                    if retries > MAX_RETRIES {
+                        tracing::error!(
+                            "Max retries reached resolving username '{}': {}",
+                            username,
+                            e
+                        );
+                        return Err(
+                            "Platform servers are temporarily out of sync. Please try again in a moment.".to_string()
+                        );
+                    }
+                    tracing::warn!(
+                        "Retrying DPNS query for '{}' (attempt {}/{}): {}",
+                        username,
+                        retries,
+                        MAX_RETRIES,
+                        e
+                    );
+                    continue;
+                }
+                return Err(format!("Failed to query DPNS: {}", e));
+            }
+        }
+    };
 
     let (_, document) = results
         .into_iter()
@@ -547,11 +573,44 @@ async fn resolve_username_to_identity(sdk: &Sdk, username: &str) -> Result<Ident
     // Get the identity ID from the DPNS document
     let identity_id = document.owner_id();
 
-    // Fetch the identity
-    Identity::fetch(sdk, identity_id)
-        .await
-        .map_err(|e| format!("Failed to fetch identity for '{}': {}", username, e))?
-        .ok_or_else(|| format!("Identity not found for username '{}'", username))
+    // Fetch the identity with retry logic
+    let mut retries = 0u32;
+    loop {
+        match Identity::fetch(sdk, identity_id).await {
+            Ok(Some(identity)) => return Ok(identity),
+            Ok(None) => return Err(format!("Identity not found for username '{}'", username)),
+            Err(e) => {
+                let error_str = e.to_string();
+                if error_str.contains("try another server")
+                    || error_str.contains("height is outdated")
+                {
+                    retries += 1;
+                    if retries > MAX_RETRIES {
+                        tracing::error!(
+                            "Max retries reached fetching identity for '{}': {}",
+                            username,
+                            e
+                        );
+                        return Err(
+                            "Platform servers are temporarily out of sync. Please try again in a moment.".to_string()
+                        );
+                    }
+                    tracing::warn!(
+                        "Retrying identity fetch for '{}' (attempt {}/{}): {}",
+                        username,
+                        retries,
+                        MAX_RETRIES,
+                        e
+                    );
+                    continue;
+                }
+                return Err(format!(
+                    "Failed to fetch identity for '{}': {}",
+                    username, e
+                ));
+            }
+        }
+    }
 }
 
 pub async fn accept_contact_request(

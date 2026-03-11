@@ -193,6 +193,24 @@ impl AddTokenByIdScreen {
         action
     }
 
+    /// Handles contract-not-found by attempting a one-time fallback to token ID lookup.
+    /// Used by both `display_message` and `display_task_result`.
+    fn handle_contract_not_found(&mut self) {
+        if !self.tried_token_id_lookup
+            && Identifier::from_string(&self.contract_or_token_id_input, Encoding::Base58).is_ok()
+        {
+            self.try_token_id_next = true;
+            self.tried_token_id_lookup = true;
+        } else {
+            MessageBanner::set_global(
+                self.app_context.egui_ctx(),
+                "No contract or token found for the given identifier",
+                MessageType::Error,
+            );
+            self.status = AddTokenStatus::Error;
+        }
+    }
+
     fn handle_fetched_contract(
         &mut self,
         contract: DataContract,
@@ -270,24 +288,7 @@ impl ScreenLike for AddTokenByIdScreen {
                 if msg.contains("DataContract successfully saved") {
                     self.status = AddTokenStatus::Complete;
                 } else if msg.contains("Contract not found") {
-                    // Contract not found — fall back to token ID lookup once
-                    if !self.tried_token_id_lookup
-                        && Identifier::from_string(
-                            &self.contract_or_token_id_input,
-                            Encoding::Base58,
-                        )
-                        .is_ok()
-                    {
-                        self.try_token_id_next = true;
-                        self.tried_token_id_lookup = true;
-                    } else {
-                        MessageBanner::set_global(
-                            self.app_context.egui_ctx(),
-                            "No contract or token found for the given identifier",
-                            MessageType::Error,
-                        );
-                        self.status = AddTokenStatus::Error;
-                    }
+                    self.handle_contract_not_found();
                 } else if msg.contains("Token not found")
                     || msg.contains("Error fetching contracts")
                 {
@@ -313,25 +314,7 @@ impl ScreenLike for AddTokenByIdScreen {
                 self.handle_fetched_contract(contract, Some(token_position));
             }
             BackendTaskSuccessResult::ContractNotFound => {
-                // Contract ID lookup failed — fall back to interpreting the input
-                // as a Token ID, but only on the first attempt. If we already
-                // tried token ID lookup and still got ContractNotFound (e.g. token
-                // was found but its contract fetch failed), treat it as an error
-                // to avoid an infinite loop.
-                if !self.tried_token_id_lookup
-                    && Identifier::from_string(&self.contract_or_token_id_input, Encoding::Base58)
-                        .is_ok()
-                {
-                    self.try_token_id_next = true;
-                    self.tried_token_id_lookup = true;
-                } else {
-                    MessageBanner::set_global(
-                        self.app_context.egui_ctx(),
-                        "No contract or token found for the given identifier",
-                        MessageType::Error,
-                    );
-                    self.status = AddTokenStatus::Error;
-                }
+                self.handle_contract_not_found();
             }
             BackendTaskSuccessResult::TokenNotFound => {
                 MessageBanner::set_global(

@@ -1215,8 +1215,13 @@ impl ScreenLike for ContactRequests {
                     self.error = Some(DashPayError::MissingEncryptionKey);
                 } else if msg.contains("DECRYPTION key") {
                     self.error = Some(DashPayError::MissingDecryptionKey);
+                } else {
+                    MessageBanner::set_global(
+                        self.app_context.egui_ctx(),
+                        &msg,
+                        MessageType::Success,
+                    );
                 }
-                // Other messages are handled globally by AppState
             }
             _ => {
                 // Ignore other results

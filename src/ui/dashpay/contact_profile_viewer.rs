@@ -3,6 +3,7 @@ use crate::backend_task::dashpay::DashPayTask;
 use crate::backend_task::{BackendTask, BackendTaskSuccessResult};
 use crate::context::AppContext;
 use crate::model::qualified_identity::QualifiedIdentity;
+use crate::ui::components::MessageBanner;
 use crate::ui::components::dashpay_subscreen_chooser_panel::add_dashpay_subscreen_chooser_panel;
 use crate::ui::components::info_popup::InfoPopup;
 use crate::ui::components::left_panel::add_left_panel;
@@ -732,8 +733,8 @@ impl ScreenLike for ContactProfileViewerScreen {
                     self.profile = None;
                 }
             }
-            BackendTaskSuccessResult::Message(_msg) => {
-                // Message display is handled globally by AppState
+            BackendTaskSuccessResult::Message(msg) => {
+                MessageBanner::set_global(self.app_context.egui_ctx(), &msg, MessageType::Success);
             }
             _ => {
                 // Ignore other results

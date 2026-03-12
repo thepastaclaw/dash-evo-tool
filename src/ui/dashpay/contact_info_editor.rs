@@ -297,8 +297,8 @@ impl ContactInfoEditorScreen {
     pub fn display_task_result(&mut self, result: BackendTaskSuccessResult) {
         self.saving = false;
         match result {
-            BackendTaskSuccessResult::Message(_msg) => {
-                // Message display is handled globally by AppState
+            BackendTaskSuccessResult::Message(msg) => {
+                MessageBanner::set_global(self.app_context.egui_ctx(), &msg, MessageType::Success);
             }
             BackendTaskSuccessResult::DashPayContactsWithInfo(contacts_data) => {
                 self.handle_contacts_result(contacts_data);

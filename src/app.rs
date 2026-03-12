@@ -1102,13 +1102,12 @@ impl App for AppState {
                         BackendTaskSuccessResult::Refresh => {
                             self.visible_screen_mut().refresh();
                         }
-                        BackendTaskSuccessResult::Message(ref msg) => {
-                            // TODO(RUST-002): Some screens inspect Message text for error
-                            // keywords and may override with an Error banner, causing a
-                            // brief green-then-red flash. Refactor to pass structured error
-                            // types through task results instead of string messages.
-                            // See https://github.com/dashpay/dash-evo-tool/issues/660 .
-                            MessageBanner::set_global(ctx, msg, MessageType::Success);
+                        BackendTaskSuccessResult::Message(_) => {
+                            // Let the screen handle Message results directly to avoid
+                            // banner stacking. Progress updates (e.g. "Searching index
+                            // 2 of 5...") each created a new global banner here,
+                            // causing duplicates. Screens that need a banner create
+                            // one themselves. (#713)
                             self.visible_screen_mut()
                                 .display_task_result(unboxed_message);
                         }

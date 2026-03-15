@@ -468,8 +468,31 @@ impl ConnectionStatus {
                     .unwrap_or(false);
                 self.set_disable_zmq(disable_zmq);
 
-                if let Ok(event) = app_context.rx_zmq_status.try_recv() {
+                // Drain all pending ZMQ events and use the most recent one.
+                // Events are consumed destructively by try_recv(), so after a
+                // network switch the channel may be empty even though the
+                // listener thread is still connected.  Fall back to the
+                // per-context cached state in that case.
+                let mut latest_event = None;
+                while let Ok(event) = app_context.rx_zmq_status.try_recv() {
+                    latest_event = Some(event);
+                }
+                if let Some(event) = latest_event {
+                    let connected = matches!(event, ZMQConnectionEvent::Connected);
+                    app_context
+                        .zmq_is_connected
+                        .store(connected, Ordering::Relaxed);
                     self.set_zmq_status(event);
+                } else {
+                    // No new events — restore from the per-context cache so
+                    // that switching back to a network doesn't lose its
+                    // Connected state.
+                    let cached = app_context.zmq_is_connected.load(Ordering::Relaxed);
+                    self.set_zmq_status(if cached {
+                        ZMQConnectionEvent::Connected
+                    } else {
+                        ZMQConnectionEvent::Disconnected
+                    });
                 }
             }
         }

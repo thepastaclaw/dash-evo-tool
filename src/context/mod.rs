@@ -62,6 +62,16 @@ pub struct AppContext {
     pub(crate) config: Arc<RwLock<NetworkConfig>>,
     pub(crate) rx_zmq_status: Receiver<ZMQConnectionEvent>,
     pub(crate) sx_zmq_status: Sender<ZMQConnectionEvent>,
+    /// Cached ZMQ connection state for this network.
+    ///
+    /// The ZMQ listener thread sends one-shot events through `sx_zmq_status`,
+    /// which are consumed destructively by `try_recv()`.  When the user
+    /// switches away from this network and back, the shared
+    /// `ConnectionStatus` is reset to `Disconnected` — but the channel is
+    /// empty because the `Connected` event was already consumed.  This
+    /// `AtomicBool` caches the last known state so that
+    /// `refresh_zmq_and_spv()` can restore it after a network switch.
+    pub(crate) zmq_is_connected: AtomicBool,
     pub(crate) dpns_contract: Arc<DataContract>,
     pub(crate) withdraws_contract: Arc<DataContract>,
     pub(crate) dashpay_contract: Arc<DataContract>,
@@ -294,6 +304,7 @@ impl AppContext {
             config: config_lock,
             sx_zmq_status,
             rx_zmq_status,
+            zmq_is_connected: AtomicBool::new(false),
             dpns_contract: Arc::new(dpns_contract),
             withdraws_contract: Arc::new(withdrawal_contract),
             dashpay_contract: Arc::new(dashpay_contract),

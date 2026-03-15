@@ -365,7 +365,7 @@ impl AppContext {
         };
 
         tracing::debug!(
-            "RPC error -19{}: wallet not specified, attempting auto-detection",
+            "Core wallet not configured{}: attempting auto-detection",
             if is_single_key { " (single-key)" } else { "" }
         );
 

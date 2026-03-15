@@ -13,6 +13,9 @@ use dash_sdk::dpp::dashcore;
 use dash_sdk::dpp::platform_value::string_encoding::Encoding;
 use thiserror::Error;
 
+/// Dash Core RPC error code: no wallet is loaded (Core has no active wallet).
+const RPC_WALLET_NOT_LOADED: i32 = -18;
+
 /// Dash Core RPC error code: wallet file not specified (multi-wallet node).
 const RPC_WALLET_NOT_SPECIFIED: i32 = -19;
 
@@ -705,7 +708,7 @@ impl From<dashcore_rpc::Error> for TaskError {
     fn from(e: dashcore_rpc::Error) -> Self {
         if let dashcore_rpc::Error::JsonRpc(dashcore_rpc::jsonrpc::error::Error::Rpc(ref rpc_err)) =
             e
-            && rpc_err.code == RPC_WALLET_NOT_SPECIFIED
+            && (rpc_err.code == RPC_WALLET_NOT_SPECIFIED || rpc_err.code == RPC_WALLET_NOT_LOADED)
         {
             return TaskError::CoreWalletNotConfigured;
         }
@@ -820,6 +823,21 @@ mod tests {
         let rpc_err = dashcore_rpc::jsonrpc::error::RpcError {
             code: -19,
             message: "Wallet file not specified".to_string(),
+            data: None,
+        };
+        let err: TaskError =
+            dashcore_rpc::Error::JsonRpc(dashcore_rpc::jsonrpc::error::Error::Rpc(rpc_err)).into();
+        assert!(
+            matches!(err, TaskError::CoreWalletNotConfigured),
+            "Expected CoreWalletNotConfigured, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rpc_error_code_neg18_converts_to_core_wallet_not_configured() {
+        let rpc_err = dashcore_rpc::jsonrpc::error::RpcError {
+            code: -18,
+            message: "No wallet is loaded. Load a wallet using loadwallet or create a new one with createwallet. (Note: A default wallet is no longer automatically created)".to_string(),
             data: None,
         };
         let err: TaskError =

@@ -323,6 +323,11 @@ pub enum IdentityTask {
     /// Search for an identity by its DPNS name (without .dash suffix)
     /// Second parameter is optional wallet seed hash for key derivation
     SearchIdentityByDpnsName(String, Option<WalletSeedHash>),
+    /// Fetch an identity by DPNS name for preview (does not insert into local DB)
+    /// Second parameter is optional wallet seed hash for key derivation
+    FetchIdentityPreviewByDpnsName(String, Option<WalletSeedHash>),
+    /// Insert a previously fetched identity into the local database
+    InsertFetchedIdentity(QualifiedIdentity),
     RegisterIdentity(IdentityRegistrationInfo),
     TopUpIdentity(IdentityTopUpInfo),
     /// Top up an identity from Platform addresses
@@ -563,6 +568,17 @@ impl AppContext {
             IdentityTask::SearchIdentityByDpnsName(dpns_name, wallet_seed_hash) => Ok(self
                 .load_identity_by_dpns_name(sdk, dpns_name, wallet_seed_hash)
                 .await?),
+            IdentityTask::FetchIdentityPreviewByDpnsName(dpns_name, wallet_seed_hash) => {
+                let qualified_identity = self
+                    .fetch_identity_by_dpns_name(sdk, dpns_name, wallet_seed_hash)
+                    .await?;
+                Ok(BackendTaskSuccessResult::IdentityPreview(
+                    qualified_identity,
+                ))
+            }
+            IdentityTask::InsertFetchedIdentity(qualified_identity) => {
+                Ok(self.insert_fetched_identity(&qualified_identity)?)
+            }
             IdentityTask::TopUpIdentity(top_up_info) => {
                 Ok(self.top_up_identity(top_up_info).await?)
             }

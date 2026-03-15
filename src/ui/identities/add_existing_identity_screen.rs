@@ -2,8 +2,10 @@ use crate::app::AppAction;
 use crate::backend_task::identity::{IdentityInputToLoad, IdentityTask};
 use crate::backend_task::{BackendTask, BackendTaskSuccessResult};
 use crate::context::AppContext;
-use crate::model::qualified_identity::IdentityType;
+use crate::model::qualified_identity::{IdentityType, QualifiedIdentity};
 use crate::model::wallet::Wallet;
+use crate::ui::components::component_trait::Component;
+use crate::ui::components::confirmation_dialog::{ConfirmationDialog, ConfirmationStatus};
 use crate::ui::components::info_popup::InfoPopup;
 use crate::ui::components::left_panel::add_left_panel;
 use crate::ui::components::password_input::PasswordInput;
@@ -17,6 +19,7 @@ use crate::ui::theme::DashColors;
 use crate::ui::{MessageType, ScreenLike};
 use bip39::rand::{prelude::IteratorRandom, thread_rng};
 use dash_sdk::dashcore_rpc::dashcore::Network;
+use dash_sdk::dpp::identity::accessors::IdentityGettersV0;
 use dash_sdk::dpp::platform_value::string_encoding::Encoding;
 use dash_sdk::platform::Identifier;
 use eframe::egui::Context;
@@ -115,6 +118,8 @@ pub struct AddExistingIdentityScreen {
     /// Whether to show advanced options
     show_advanced_options: bool,
     refresh_banner: Option<BannerHandle>,
+    /// Confirmation dialog for DPNS identity preview before loading
+    dpns_identity_confirmation: Option<(ConfirmationDialog, QualifiedIdentity)>,
 }
 
 impl AddExistingIdentityScreen {
@@ -160,6 +165,7 @@ impl AddExistingIdentityScreen {
             dpns_name_input: String::new(),
             show_advanced_options: false,
             refresh_banner: None,
+            dpns_identity_confirmation: None,
         }
     }
 
@@ -853,7 +859,7 @@ impl AddExistingIdentityScreen {
             self.success_message = None;
             let handle = MessageBanner::set_global(
                 self.app_context.egui_ctx(),
-                "Loading identity...",
+                "Searching for identity...",
                 MessageType::Info,
             );
             handle.with_elapsed();
@@ -868,8 +874,9 @@ impl AddExistingIdentityScreen {
                 None
             };
 
+            // Fetch identity preview first (does not insert into local DB)
             action = AppAction::BackendTask(BackendTask::IdentityTask(
-                IdentityTask::SearchIdentityByDpnsName(
+                IdentityTask::FetchIdentityPreviewByDpnsName(
                     name_trimmed.to_string(),
                     selected_wallet_seed_hash,
                 ),
@@ -1035,6 +1042,37 @@ impl ScreenLike for AddExistingIdentityScreen {
                 self.success_message = Some("Successfully loaded identity.".to_string());
                 self.add_identity_status = AddIdentityStatus::Complete;
             }
+            BackendTaskSuccessResult::IdentityPreview(qualified_identity) => {
+                self.refresh_banner.take_and_clear();
+                self.add_identity_status = AddIdentityStatus::NotStarted;
+
+                // Build a descriptive preview message for the confirmation dialog
+                let identity = &qualified_identity.identity;
+                let id_hex = identity.id().to_string(Encoding::Base58);
+                let balance = identity.balance();
+                let keys_count = identity.public_keys().len();
+                let dpns_names: Vec<String> = qualified_identity
+                    .dpns_names
+                    .iter()
+                    .map(|n| format!("{}.dash", n.name))
+                    .collect();
+                let names_display = if dpns_names.is_empty() {
+                    "None".to_string()
+                } else {
+                    dpns_names.join(", ")
+                };
+
+                let message = format!(
+                    "Identity ID: {}\nBalance: {} credits\nPublic Keys: {}\nDPNS Names: {}\n\nLoad this identity into the local database?",
+                    id_hex, balance, keys_count, names_display
+                );
+
+                let dialog = ConfirmationDialog::new("Identity Found", message)
+                    .confirm_text(Some("Load Identity"))
+                    .cancel_text(Some("Cancel"));
+
+                self.dpns_identity_confirmation = Some((dialog, qualified_identity));
+            }
             BackendTaskSuccessResult::Message(msg) => {
                 // Check if this is a final success message or a progress update
                 if msg.starts_with("Successfully loaded") || msg.starts_with("Finished loading") {
@@ -1143,6 +1181,30 @@ impl ScreenLike for AddExistingIdentityScreen {
 
                     // Status display is handled by the global MessageBanner
                 });
+
+            // Handle DPNS identity confirmation dialog
+            if let Some((dialog, _identity)) = &mut self.dpns_identity_confirmation {
+                let response = dialog.show(ui);
+                if response.inner.dialog_response == Some(ConfirmationStatus::Confirmed) {
+                    // User confirmed — insert the identity into the local database
+                    if let Some((_dialog, identity)) = self.dpns_identity_confirmation.take() {
+                        self.add_identity_status = AddIdentityStatus::WaitingForResult;
+                        let handle = MessageBanner::set_global(
+                            self.app_context.egui_ctx(),
+                            "Loading identity...",
+                            MessageType::Info,
+                        );
+                        handle.with_elapsed();
+                        self.refresh_banner = Some(handle);
+
+                        inner_action = AppAction::BackendTask(BackendTask::IdentityTask(
+                            IdentityTask::InsertFetchedIdentity(identity),
+                        ));
+                    }
+                } else if response.inner.dialog_response == Some(ConfirmationStatus::Canceled) {
+                    self.dpns_identity_confirmation = None;
+                }
+            }
 
             inner_action
         });

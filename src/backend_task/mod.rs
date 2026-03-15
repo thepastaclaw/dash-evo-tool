@@ -232,6 +232,8 @@ pub enum BackendTaskSuccessResult {
     RegisteredDpnsName(FeeResult),
     RefreshedIdentity(QualifiedIdentity),
     LoadedIdentity(QualifiedIdentity),
+    /// Identity fetched for preview (not yet inserted into local DB)
+    IdentityPreview(QualifiedIdentity),
 
     // Document operation results (replacing string messages)
     DeletedDocument(Identifier, FeeResult),

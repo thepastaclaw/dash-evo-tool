@@ -13,13 +13,14 @@ use dash_sdk::drive::query::{WhereClause, WhereOperator};
 use dash_sdk::platform::{Document, DocumentQuery, Fetch, FetchMany, Identifier, Identity};
 
 impl AppContext {
-    /// Load an identity by its DPNS name
-    pub(super) async fn load_identity_by_dpns_name(
+    /// Fetch an identity by its DPNS name without inserting it into the local database.
+    /// Returns the QualifiedIdentity for preview purposes.
+    pub(super) async fn fetch_identity_by_dpns_name(
         &self,
         sdk: &Sdk,
         dpns_name: String,
         selected_wallet_seed_hash: Option<WalletSeedHash>,
-    ) -> Result<BackendTaskSuccessResult, TaskError> {
+    ) -> Result<QualifiedIdentity, TaskError> {
         // Normalize the name (convert to lowercase and handle homoglyphs)
         let normalized_name = convert_to_homograph_safe_chars(&dpns_name);
 
@@ -171,6 +172,21 @@ impl AppContext {
             status: IdentityStatus::Active,
             network: self.network,
         };
+
+        Ok(qualified_identity)
+    }
+
+    /// Load an identity by its DPNS name and insert it into the local database
+    pub(super) async fn load_identity_by_dpns_name(
+        &self,
+        sdk: &Sdk,
+        dpns_name: String,
+        selected_wallet_seed_hash: Option<WalletSeedHash>,
+    ) -> Result<BackendTaskSuccessResult, TaskError> {
+        let qualified_identity = self
+            .fetch_identity_by_dpns_name(sdk, dpns_name, selected_wallet_seed_hash)
+            .await?;
+
         let wallet_info = qualified_identity
             .determine_wallet_info()
             .map_err(|e| TaskError::WalletInfoDeterminationFailed { detail: e })?;
@@ -179,5 +195,21 @@ impl AppContext {
         self.insert_local_qualified_identity(&qualified_identity, &wallet_info)?;
 
         Ok(BackendTaskSuccessResult::LoadedIdentity(qualified_identity))
+    }
+
+    /// Insert a pre-fetched identity into the local database
+    pub(super) fn insert_fetched_identity(
+        &self,
+        qualified_identity: &QualifiedIdentity,
+    ) -> Result<BackendTaskSuccessResult, TaskError> {
+        let wallet_info = qualified_identity
+            .determine_wallet_info()
+            .map_err(|e| TaskError::WalletInfoDeterminationFailed { detail: e })?;
+
+        self.insert_local_qualified_identity(qualified_identity, &wallet_info)?;
+
+        Ok(BackendTaskSuccessResult::LoadedIdentity(
+            qualified_identity.clone(),
+        ))
     }
 }

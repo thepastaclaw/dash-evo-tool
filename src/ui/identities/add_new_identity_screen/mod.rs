@@ -835,6 +835,7 @@ impl AddNewIdentityScreen {
             }
             FundingMethod::UseWalletBalance => {
                 // Get the funding amount in duffs from the Amount
+                // 1 duff = 1000 credits, so we divide by 1000
                 let amount = self
                     .funding_amount
                     .as_ref()
@@ -842,6 +843,11 @@ impl AddNewIdentityScreen {
                     .unwrap_or(0);
 
                 if amount == 0 {
+                    MessageBanner::set_global(
+                        self.app_context.egui_ctx(),
+                        "Amount too small. Minimum is 0.00000001 DASH (1 duff).",
+                        MessageType::Error,
+                    );
                     return AppAction::None;
                 }
 
@@ -931,17 +937,27 @@ impl AddNewIdentityScreen {
 
         let show_max_button = funding_method == FundingMethod::UseWalletBalance;
 
+        // Minimum 1 duff = 1000 credits (0.00000001 DASH) for wallet balance funding,
+        // since amounts below 1 duff cannot create asset lock transactions.
+        let min_amount_credits: Option<u64> = if funding_method == FundingMethod::UseWalletBalance {
+            Some(1000) // 1 duff = 1000 credits
+        } else {
+            Some(1) // default minimum
+        };
+
         let amount_input = self.funding_amount_input.get_or_insert_with(|| {
             AmountInput::new(Amount::new_dash(0.0))
                 .with_label("Amount (DASH):")
                 .with_hint_text("Enter amount (e.g., 0.1234)")
                 .with_max_button(show_max_button)
+                .with_min_amount(min_amount_credits)
                 .with_desired_width(150.0)
         });
 
-        // Update max amount and max button visibility dynamically
+        // Update max amount, min amount, and max button visibility dynamically
         amount_input
             .set_max_amount(max_amount_credits)
+            .set_min_amount(min_amount_credits)
             .set_show_max_button(show_max_button);
 
         let response = amount_input.show(ui);

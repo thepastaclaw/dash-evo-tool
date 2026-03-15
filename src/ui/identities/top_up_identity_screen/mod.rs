@@ -339,6 +339,11 @@ impl TopUpIdentityScreen {
                 });
 
                 if amount == 0 {
+                    MessageBanner::set_global(
+                        self.app_context.egui_ctx(),
+                        "Amount too small. Minimum is 0.00000001 DASH (1 duff).",
+                        MessageType::Error,
+                    );
                     return AppAction::None;
                 }
                 let identity_input = IdentityTopUpInfo {
@@ -399,16 +404,26 @@ impl TopUpIdentityScreen {
                 (None, false, None)
             };
 
+        // Minimum 1 duff = 1000 credits (0.00000001 DASH) for wallet balance funding,
+        // since amounts below 1 duff cannot create asset lock transactions.
+        let min_amount_credits: Option<u64> = if funding_method == FundingMethod::UseWalletBalance {
+            Some(1000) // 1 duff = 1000 credits
+        } else {
+            Some(1) // default minimum
+        };
+
         // Lazy initialization of the AmountInput component
         let amount_input = self.funding_amount_input.get_or_insert_with(|| {
             AmountInput::new(Amount::new_dash(0.0))
                 .with_label("Amount:")
                 .with_max_button(show_max_button)
                 .with_max_amount(max_amount)
+                .with_min_amount(min_amount_credits)
         });
 
-        // Update max amount and button visibility in case funding method or wallet balance changed
+        // Update max amount, min amount, and button visibility in case funding method or wallet balance changed
         amount_input.set_max_amount(max_amount);
+        amount_input.set_min_amount(min_amount_credits);
         amount_input.set_show_max_button(show_max_button);
         amount_input.set_max_exceeded_hint(fee_hint);
 

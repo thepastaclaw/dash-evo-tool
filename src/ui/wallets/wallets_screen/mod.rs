@@ -6,6 +6,7 @@ mod single_key_view;
 use crate::app::{AppAction, DesiredAppAction};
 use crate::backend_task::BackendTask;
 use crate::backend_task::core::CoreTask;
+use crate::backend_task::error::TaskError;
 use crate::context::AppContext;
 use crate::context::connection_status::spv_phase_summary;
 use crate::model::amount::Amount;
@@ -14,11 +15,15 @@ use crate::spv::{CoreBackendMode, SpvStatus};
 use crate::ui::components::component_trait::Component;
 use crate::ui::components::confirmation_dialog::{ConfirmationDialog, ConfirmationStatus};
 use crate::ui::components::left_panel::add_left_panel;
+use crate::ui::components::password_input::PasswordInput;
+use crate::ui::components::selection_dialog::{SelectionDialog, SelectionStatus};
 use crate::ui::components::styled::island_central_panel;
 use crate::ui::components::top_panel::add_top_panel;
 use crate::ui::components::wallet_unlock_popup::{WalletUnlockPopup, WalletUnlockResult};
+use crate::ui::components::{BannerHandle, MessageBanner, OptionBannerExt};
+use crate::ui::helpers::clicked_outside_window;
 use crate::ui::helpers::copy_text_to_clipboard;
-use crate::ui::theme::DashColors;
+use crate::ui::theme::{ComponentStyles, DashColors, ResponseExt};
 use crate::ui::wallets::account_summary::{
     AccountCategory, AccountSummary, collect_account_summaries,
 };
@@ -72,7 +77,6 @@ pub struct WalletsBalancesScreen {
     selected_wallet: Option<Arc<RwLock<Wallet>>>,
     selected_single_key_wallet: Option<Arc<RwLock<SingleKeyWallet>>>,
     pub(crate) app_context: Arc<AppContext>,
-    message: Option<(String, MessageType, DateTime<Utc>)>,
     sort_column: SortColumn,
     sort_order: SortOrder,
     refreshing: bool,
@@ -80,9 +84,7 @@ pub struct WalletsBalancesScreen {
     rename_input: String,
     wallet_unlock_popup: WalletUnlockPopup,
     show_sk_unlock_dialog: bool,
-    sk_wallet_password: String,
-    sk_show_password: bool,
-    sk_error_message: Option<String>,
+    sk_password_input: PasswordInput,
     remove_wallet_dialog: Option<ConfirmationDialog>,
     pending_wallet_removal: Option<WalletSeedHash>,
     pending_wallet_removal_alias: Option<String>,
@@ -101,12 +103,28 @@ pub struct WalletsBalancesScreen {
     pending_refresh_mode: RefreshMode,
     /// Whether we should search for asset locks after wallet is unlocked
     pending_asset_lock_search_after_unlock: bool,
+    /// Banner handle for asset lock search progress
+    asset_lock_search_banner: Option<BannerHandle>,
     /// Current page for single key wallet UTXO pagination (0-indexed)
     utxo_page: usize,
     /// Selected refresh mode (only shown in dev mode)
     refresh_mode: RefreshMode,
     /// Cached platform sync info: (last_sync_timestamp, last_sync_height)
     platform_sync_info: Option<(u64, u64)>,
+    /// Core wallet selection dialog (shown when auto-detection fails)
+    core_wallet_dialog: Option<SelectionDialog>,
+    /// Seed/key hash of the wallet pending Core wallet selection
+    pending_core_wallet_seed_hash: Option<[u8; 32]>,
+    /// Core wallet options for the pending selection
+    pending_core_wallet_options: Option<Vec<String>>,
+    /// Whether the pending Core wallet selection is for a single-key wallet
+    pending_core_wallet_is_single_key: bool,
+    /// Whether we need to fire a ListCoreWallets backend task (set on CoreWalletNotConfigured error)
+    pending_list_core_wallets: bool,
+    /// Wallet hash pending the ListCoreWallets response
+    pending_list_wallet_hash: Option<[u8; 32]>,
+    /// Whether the wallet pending list is a single-key wallet
+    pending_list_is_single_key: bool,
 }
 
 impl WalletsBalancesScreen {
@@ -174,7 +192,6 @@ impl WalletsBalancesScreen {
             selected_wallet,
             selected_single_key_wallet,
             app_context: app_context.clone(),
-            message: None,
             sort_column: SortColumn::Index,
             sort_order: SortOrder::Ascending,
             refreshing: false,
@@ -182,9 +199,7 @@ impl WalletsBalancesScreen {
             rename_input: String::new(),
             wallet_unlock_popup: WalletUnlockPopup::new(),
             show_sk_unlock_dialog: false,
-            sk_wallet_password: String::new(),
-            sk_show_password: false,
-            sk_error_message: None,
+            sk_password_input: PasswordInput::new().with_hint_text("Enter password"),
             remove_wallet_dialog: None,
             pending_wallet_removal: None,
             pending_wallet_removal_alias: None,
@@ -199,9 +214,17 @@ impl WalletsBalancesScreen {
             pending_refresh_after_unlock: false,
             pending_refresh_mode: RefreshMode::default(),
             pending_asset_lock_search_after_unlock: false,
+            asset_lock_search_banner: None,
             utxo_page: 0,
             refresh_mode: RefreshMode::default(),
             platform_sync_info,
+            core_wallet_dialog: None,
+            pending_core_wallet_seed_hash: None,
+            pending_core_wallet_options: None,
+            pending_core_wallet_is_single_key: false,
+            pending_list_core_wallets: false,
+            pending_list_wallet_hash: None,
+            pending_list_is_single_key: false,
         }
     }
 
@@ -223,6 +246,60 @@ impl WalletsBalancesScreen {
             .app_context
             .db
             .update_selected_single_key_hash(hash.as_ref());
+    }
+
+    /// Persist the selected Core wallet name to the DB and in-memory wallet.
+    ///
+    /// Returns `Ok(())` on success or `Err` with a user-facing message on failure.
+    fn apply_core_wallet_selection(
+        &mut self,
+        wallet_hash: &[u8; 32],
+        wallet_name: &str,
+        is_single_key: bool,
+    ) -> Result<(), String> {
+        if !is_single_key {
+            match self
+                .app_context
+                .db
+                .set_wallet_core_wallet_name(wallet_hash, Some(wallet_name))
+            {
+                Ok(false) => {
+                    return Err("Wallet not found in database".to_string());
+                }
+                Err(e) => {
+                    return Err(format!("Failed to save Dash Core wallet: {e}"));
+                }
+                Ok(true) => {}
+            }
+            if let Ok(wallets) = self.app_context.wallets.read()
+                && let Some(w) = wallets.get(wallet_hash)
+                && let Ok(mut guard) = w.write()
+            {
+                guard.core_wallet_name = Some(wallet_name.to_string());
+            }
+        } else {
+            match self
+                .app_context
+                .db
+                .set_single_key_wallet_core_wallet_name(wallet_hash, Some(wallet_name))
+            {
+                Ok(false) => {
+                    return Err("Wallet not found in database".to_string());
+                }
+                Err(e) => {
+                    return Err(format!("Failed to save Dash Core wallet: {e}"));
+                }
+                Ok(true) => {}
+            }
+            if let Ok(skw) = self.app_context.single_key_wallets.read()
+                && let Some(w) = skw.get(wallet_hash)
+                && let Ok(mut guard) = w.write()
+            {
+                guard.core_wallet_name = Some(wallet_name.to_string());
+            }
+        }
+
+        Ok(())
     }
 
     /// Refresh the cached platform sync info from the database.
@@ -329,6 +406,12 @@ impl WalletsBalancesScreen {
         self.platform_sync_info = None;
     }
 
+    pub(crate) fn reset_pending_list_state(&mut self) {
+        self.pending_list_core_wallets = false;
+        self.pending_list_wallet_hash = None;
+        self.pending_list_is_single_key = false;
+    }
+
     fn add_receiving_address(&mut self) {
         if let Some(wallet) = &self.selected_wallet {
             let result = {
@@ -339,14 +422,22 @@ impl WalletsBalancesScreen {
             match result {
                 Ok(address) => {
                     let message = format!("Added new receiving address: {}", address);
-                    self.display_message(&message, MessageType::Success);
+                    MessageBanner::set_global(
+                        self.app_context.egui_ctx(),
+                        &message,
+                        MessageType::Success,
+                    );
                 }
                 Err(e) => {
-                    self.display_message(&e, MessageType::Error);
+                    MessageBanner::set_global(self.app_context.egui_ctx(), &e, MessageType::Error);
                 }
             }
         } else {
-            self.display_message("No wallet selected", MessageType::Error);
+            MessageBanner::set_global(
+                self.app_context.egui_ctx(),
+                "No wallet selected",
+                MessageType::Error,
+            );
         }
     }
 
@@ -564,8 +655,9 @@ impl WalletsBalancesScreen {
                                 .db
                                 .remove_single_key_wallet(&key_hash, self.app_context.network)
                             {
-                                self.display_message(
-                                    &format!("Failed to remove: {}", e),
+                                MessageBanner::set_global(
+                                    ui.ctx(),
+                                    format!("Failed to remove: {}", e),
                                     MessageType::Error,
                                 );
                             } else {
@@ -576,7 +668,11 @@ impl WalletsBalancesScreen {
                                 self.selected_single_key_wallet = None;
                                 // Clear persisted selection in AppContext and database
                                 self.persist_selected_single_key_hash(None);
-                                self.display_message("Wallet removed", MessageType::Success);
+                                MessageBanner::set_global(
+                                    ui.ctx(),
+                                    "Wallet removed",
+                                    MessageType::Success,
+                                );
                             }
                         }
 
@@ -725,14 +821,16 @@ impl WalletsBalancesScreen {
                 self.wallet_unlock_popup.close();
                 self.refreshing = false;
 
-                self.display_message(
-                    &format!("Removed wallet \"{}\" successfully", alias),
+                MessageBanner::set_global(
+                    self.app_context.egui_ctx(),
+                    format!("Removed wallet \"{}\" successfully", alias),
                     MessageType::Success,
                 );
             }
             Err(err) => {
-                self.display_message(
-                    &format!("Failed to remove wallet: {}", err),
+                MessageBanner::set_global(
+                    self.app_context.egui_ctx(),
+                    format!("Failed to remove wallet: {}", err),
                     MessageType::Error,
                 );
             }
@@ -801,18 +899,6 @@ impl WalletsBalancesScreen {
                     ui.add_space(5.0);
                 });
             });
-    }
-
-    fn dismiss_message(&mut self) {
-        self.message = None;
-    }
-
-    fn check_message_expiration(&mut self) {
-        // Messages no longer auto-expire, they must be dismissed manually
-    }
-
-    fn set_message(&mut self, message: String, message_type: MessageType) {
-        self.message = Some((message, message_type, Utc::now()));
     }
 
     fn format_dash(amount_duffs: u64) -> String {
@@ -930,7 +1016,11 @@ impl WalletsBalancesScreen {
                             .create_screen(&self.app_context),
                     );
                 } else {
-                    self.display_message("Select a wallet first", MessageType::Error);
+                    MessageBanner::set_global(
+                        ui.ctx(),
+                        "Select a wallet first",
+                        MessageType::Error,
+                    );
                 }
             }
 
@@ -1135,10 +1225,10 @@ impl WalletsBalancesScreen {
                             let full_txid = tx.txid.to_string();
                             ui.horizontal(|ui| {
                                 let response = ui.label(RichText::new(&full_txid).monospace());
-                                response.on_hover_text(&full_txid);
+                                response.info_tooltip(&full_txid);
                                 if ui
                                     .small_button("Copy")
-                                    .on_hover_text("Copy transaction ID")
+                                    .clickable_tooltip("Copy transaction ID")
                                     .clicked()
                                 {
                                     let _ = copy_text_to_clipboard(&full_txid);
@@ -1435,8 +1525,9 @@ impl WalletsBalancesScreen {
             let mut wallet = match wallet_arc.write() {
                 Ok(guard) => guard,
                 Err(err) => {
-                    self.display_message(
-                        &format!("Failed to lock wallet: {}", err),
+                    MessageBanner::set_global(
+                        self.app_context.egui_ctx(),
+                        format!("Failed to lock wallet: {}", err),
                         MessageType::Error,
                     );
                     return;
@@ -1453,7 +1544,11 @@ impl WalletsBalancesScreen {
 
         if locked {
             self.app_context.handle_wallet_locked(&wallet_arc);
-            self.display_message("Wallet locked", MessageType::Info);
+            MessageBanner::set_global(
+                self.app_context.egui_ctx(),
+                "Wallet locked",
+                MessageType::Info,
+            );
         }
     }
 
@@ -1507,8 +1602,6 @@ impl WalletsBalancesScreen {
 
 impl ScreenLike for WalletsBalancesScreen {
     fn ui(&mut self, ctx: &Context) -> AppAction {
-        self.check_message_expiration();
-
         // Check for pending platform balance refresh (triggered after transfers)
         let pending_refresh_action = if let Some(seed_hash) =
             self.pending_platform_balance_refresh.take()
@@ -1569,38 +1662,7 @@ impl ScreenLike for WalletsBalancesScreen {
             let mut inner_action = AppAction::None;
             let dark_mode = ui.ctx().style().visuals.dark_mode;
 
-            // Display messages at the top, outside of scroll area
-            let message = self.message.clone();
-            if let Some((message, message_type, _timestamp)) = message {
-                let message_color = match message_type {
-                    MessageType::Error => DashColors::ERROR,
-                    MessageType::Warning => DashColors::WARNING,
-                    MessageType::Info => DashColors::text_primary(dark_mode),
-                    MessageType::Success => egui::Color32::DARK_GREEN,
-                };
-
-                // Display message in a prominent frame with text wrapping
-                Frame::new()
-                    .fill(message_color.gamma_multiply(0.1))
-                    .inner_margin(Margin::symmetric(10, 8))
-                    .corner_radius(5.0)
-                    .stroke(egui::Stroke::new(1.0, message_color))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&message).color(message_color),
-                                )
-                                .wrap(),
-                            );
-                            ui.add_space(5.0);
-                            if ui.small_button("Dismiss").clicked() {
-                                self.dismiss_message();
-                            }
-                        });
-                    });
-                ui.add_space(10.0);
-            }
+            // Message display is handled by the global MessageBanner
 
             egui::ScrollArea::vertical()
                 .auto_shrink([true; 2])
@@ -1653,10 +1715,12 @@ impl ScreenLike for WalletsBalancesScreen {
 
         // Rename dialog
         if self.show_rename_dialog {
-            egui::Window::new("Rename Wallet")
+            let window_response = egui::Window::new("Rename Wallet")
                 .collapsible(false)
                 .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
+                    let dark_mode = ui.ctx().style().visuals.dark_mode;
                     ui.vertical(|ui| {
                         ui.label("Enter new wallet name:");
                         ui.add_space(5.0);
@@ -1669,7 +1733,16 @@ impl ScreenLike for WalletsBalancesScreen {
                         ui.add_space(10.0);
 
                         ui.horizontal(|ui| {
-                            if ui.button("Save").clicked() {
+                            if ComponentStyles::add_secondary_button(ui, "Cancel", dark_mode)
+                                .clicked()
+                            {
+                                self.show_rename_dialog = false;
+                                self.rename_input.clear();
+                            }
+
+                            ui.add_space(8.0);
+
+                            if ComponentStyles::add_primary_button(ui, "Save").clicked() {
                                 // Limit the alias length to 64 characters
                                 if self.rename_input.len() > 64 {
                                     self.rename_input.truncate(64);
@@ -1711,14 +1784,16 @@ impl ScreenLike for WalletsBalancesScreen {
                                 self.show_rename_dialog = false;
                                 self.rename_input.clear();
                             }
-
-                            if ui.button("Cancel").clicked() {
-                                self.show_rename_dialog = false;
-                                self.rename_input.clear();
-                            }
                         });
                     });
                 });
+
+            if let Some(ref resp) = window_response
+                && clicked_outside_window(ctx, resp.response.rect)
+            {
+                self.show_rename_dialog = false;
+                self.rename_input.clear();
+            }
         }
 
         // HD Wallet unlock popup
@@ -1740,7 +1815,7 @@ impl ScreenLike for WalletsBalancesScreen {
                                 self.private_key_dialog.show_key = false;
                             }
                             Err(err) => {
-                                self.display_message(&err, MessageType::Error);
+                                MessageBanner::set_global(ctx, &err, MessageType::Error);
                             }
                         }
                     }
@@ -1766,10 +1841,14 @@ impl ScreenLike for WalletsBalancesScreen {
                     if self.pending_asset_lock_search_after_unlock {
                         self.pending_asset_lock_search_after_unlock = false;
                         if let Some(wallet_arc) = self.selected_wallet.clone() {
-                            self.display_message(
+                            self.asset_lock_search_banner.take_and_clear();
+                            let handle = MessageBanner::set_global(
+                                ctx,
                                 "Searching for unused asset locks...",
                                 MessageType::Info,
                             );
+                            handle.with_elapsed();
+                            self.asset_lock_search_banner = Some(handle);
                             action |= AppAction::BackendTask(BackendTask::CoreTask(
                                 CoreTask::RecoverAssetLocks(wallet_arc),
                             ));
@@ -1800,6 +1879,7 @@ impl ScreenLike for WalletsBalancesScreen {
             egui::Window::new("Unlock Wallet")
                 .collapsible(false)
                 .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
                     ui.vertical(|ui| {
                         if let Some(wallet_arc) = &self.selected_single_key_wallet
@@ -1816,88 +1896,57 @@ impl ScreenLike for WalletsBalancesScreen {
 
                         ui.add_space(10.0);
 
-                        let dark_mode = ui.ctx().style().visuals.dark_mode;
                         let mut attempt_unlock = false;
 
-                        ui.horizontal(|ui| {
-                            let password_input = ui.add(
-                                egui::TextEdit::singleline(&mut self.sk_wallet_password)
-                                    .password(!self.sk_show_password)
-                                    .hint_text("Enter password")
-                                    .desired_width(250.0)
-                                    .text_color(DashColors::text_primary(dark_mode))
-                                    .background_color(DashColors::input_background(dark_mode)),
-                            );
+                        let pw_response = self.sk_password_input.show(ui);
 
-                            if password_input.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                            {
-                                attempt_unlock = true;
-                            }
-                        });
-
-                        ui.add_space(5.0);
-
-                        ui.checkbox(&mut self.sk_show_password, "Show Password");
+                        if pw_response.response.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
+                            attempt_unlock = true;
+                        }
 
                         ui.add_space(10.0);
 
                         ui.horizontal(|ui| {
-                            if ui.button("Unlock").clicked() {
-                                attempt_unlock = true;
+                            let dark_mode = ui.ctx().style().visuals.dark_mode;
+                            if ComponentStyles::add_secondary_button(ui, "Cancel", dark_mode)
+                                .clicked()
+                            {
+                                close_dialog = true;
                             }
 
-                            if ui.button("Cancel").clicked() {
-                                close_dialog = true;
+                            ui.add_space(8.0);
+
+                            if ComponentStyles::add_primary_button(ui, "Unlock").clicked() {
+                                attempt_unlock = true;
                             }
                         });
 
                         if attempt_unlock {
                             if let Some(wallet_arc) = &self.selected_single_key_wallet {
                                 let mut wallet = wallet_arc.write().unwrap();
-                                let unlock_result = wallet.open(&self.sk_wallet_password);
+                                let unlock_result = wallet.open(self.sk_password_input.text());
 
                                 match unlock_result {
                                     Ok(_) => {
-                                        self.sk_error_message = None;
                                         close_dialog = true;
                                     }
                                     Err(_) => {
-                                        self.sk_error_message =
-                                            Some("Incorrect Password".to_string());
+                                        MessageBanner::set_global(ui.ctx(), "Incorrect Password", MessageType::Error);
                                     }
                                 }
                             }
-                            self.sk_wallet_password.clear();
+                            self.sk_password_input.clear();
                         }
 
-                        // Display error message if the password was incorrect
-                        if let Some(error_message) = self.sk_error_message.clone() {
-                            ui.add_space(5.0);
-                            let error_color = DashColors::ERROR;
-                            Frame::new()
-                                .fill(error_color.gamma_multiply(0.1))
-                                .inner_margin(Margin::symmetric(10, 8))
-                                .corner_radius(5.0)
-                                .stroke(egui::Stroke::new(1.0, error_color))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(RichText::new(format!("Error: {}", error_message)).color(error_color));
-                                        ui.add_space(10.0);
-                                        if ui.small_button("Dismiss").clicked() {
-                                            self.sk_error_message = None;
-                                        }
-                                    });
-                                });
-                        }
+                        // Error display is handled by the global MessageBanner.
                     });
                 });
 
             if close_dialog {
                 self.show_sk_unlock_dialog = false;
-                self.sk_wallet_password.clear();
-                self.sk_error_message = None;
-
+                self.sk_password_input.clear();
                 // Check if we were trying to refresh the SK wallet
                 if self.pending_refresh_after_unlock {
                     self.pending_refresh_after_unlock = false;
@@ -1961,10 +2010,75 @@ impl ScreenLike for WalletsBalancesScreen {
                     action = AppAction::None;
                 } else {
                     // Wallet is unlocked - proceed with search
-                    self.display_message("Searching for unused asset locks...", MessageType::Info);
+                    self.asset_lock_search_banner.take_and_clear();
+                    let handle = MessageBanner::set_global(
+                        ctx,
+                        "Searching for unused asset locks...",
+                        MessageType::Info,
+                    );
+                    handle.with_elapsed();
+                    self.asset_lock_search_banner = Some(handle);
                     action = AppAction::BackendTask(BackendTask::CoreTask(
                         CoreTask::RecoverAssetLocks(wallet_arc),
                     ));
+                }
+            }
+        }
+
+        // Dispatch the async ListCoreWallets task if pending
+        if self.pending_list_core_wallets {
+            self.pending_list_core_wallets = false;
+            action |= AppAction::BackendTask(BackendTask::CoreTask(CoreTask::ListCoreWallets));
+        }
+
+        // Show Core wallet selection dialog if active
+        if let Some(dialog) = self.core_wallet_dialog.as_mut()
+            && let Some(status) = dialog.show_modal(ctx)
+        {
+            self.core_wallet_dialog = None;
+            match status {
+                SelectionStatus::Selected(idx) => {
+                    if let Some(wallet_hash) = self.pending_core_wallet_seed_hash.take()
+                        && let Some(wallets) = self.pending_core_wallet_options.take()
+                        && let Some(wallet_name) = wallets.get(idx).cloned()
+                    {
+                        let is_single_key = self.pending_core_wallet_is_single_key;
+                        match self.apply_core_wallet_selection(
+                            &wallet_hash,
+                            &wallet_name,
+                            is_single_key,
+                        ) {
+                            Ok(()) => {
+                                MessageBanner::set_global(
+                                    ctx,
+                                    format!(
+                                        "Dash Core wallet '{}' assigned — refreshing wallet. If you were performing another operation, please retry it.",
+                                        wallet_name
+                                    ),
+                                    MessageType::Success,
+                                );
+                                self.refresh();
+                            }
+                            Err(e) => {
+                                MessageBanner::set_global(
+                                    ctx,
+                                    "Failed to save Dash Core wallet",
+                                    MessageType::Error,
+                                )
+                                .with_details(e);
+                            }
+                        }
+                    }
+                }
+                SelectionStatus::Canceled => {
+                    self.pending_core_wallet_seed_hash = None;
+                    self.pending_core_wallet_options = None;
+                    self.pending_core_wallet_is_single_key = false;
+                    MessageBanner::set_global(
+                        ctx,
+                        "Dash Core wallet not selected. Some operations may fail until a wallet is assigned.",
+                        MessageType::Info,
+                    );
                 }
             }
         }
@@ -1975,18 +2089,53 @@ impl ScreenLike for WalletsBalancesScreen {
     }
 
     fn display_message(&mut self, message: &str, message_type: MessageType) {
-        if let MessageType::Error = message_type {
-            self.refreshing = false;
+        // Banner display is handled globally by AppState; this is only for side-effects.
+        // Always clear refreshing — the originating task is done regardless of result type.
+        self.refreshing = false;
+
+        if matches!(message_type, MessageType::Error | MessageType::Warning) {
+            self.asset_lock_search_banner.take_and_clear();
 
             // If the fund platform dialog is processing, show error in the dialog instead
             if self.fund_platform_dialog.is_processing {
                 self.fund_platform_dialog.is_processing = false;
                 self.fund_platform_dialog.status = Some(message.to_string());
                 self.fund_platform_dialog.status_is_error = true;
-                return;
             }
         }
-        self.set_message(message.to_string(), message_type);
+    }
+
+    /// Intercept Core-wallet-not-configured errors and schedule an async
+    /// `ListCoreWallets` backend task (instead of blocking the UI thread).
+    fn display_task_error(&mut self, error: &TaskError) -> bool {
+        if matches!(error, TaskError::CoreWalletNotConfigured) {
+            self.refreshing = false;
+            self.asset_lock_search_banner.take_and_clear();
+
+            // Determine the wallet hash and whether it is a single-key wallet
+            let (wallet_hash, is_single_key) = if let Some(hash) = self
+                .selected_wallet
+                .as_ref()
+                .and_then(|w| w.read().ok().map(|g| g.seed_hash()))
+            {
+                (Some(hash), false)
+            } else if let Some(hash) = self
+                .selected_single_key_wallet
+                .as_ref()
+                .and_then(|w| w.read().ok().map(|g| g.key_hash))
+            {
+                (Some(hash), true)
+            } else {
+                (None, false)
+            };
+
+            self.pending_list_core_wallets = true;
+            self.pending_list_wallet_hash = wallet_hash;
+            self.pending_list_is_single_key = is_single_key;
+            true // Suppress generic error banner
+        } else {
+            false
+        }
     }
 
     fn display_task_result(
@@ -2006,13 +2155,15 @@ impl ScreenLike for WalletsBalancesScreen {
                     self.refresh_platform_sync_info_cache(&hash);
                 }
                 if let Some(warn_msg) = warning {
-                    self.set_message(
+                    MessageBanner::set_global(
+                        self.app_context.egui_ctx(),
                         format!("Wallet refreshed with warning: {}", warn_msg),
                         MessageType::Info,
                     );
                 } else {
-                    self.set_message(
-                        "Successfully refreshed wallet".to_string(),
+                    MessageBanner::set_global(
+                        self.app_context.egui_ctx(),
+                        "Successfully refreshed wallet",
                         MessageType::Success,
                     );
                 }
@@ -2021,6 +2172,7 @@ impl ScreenLike for WalletsBalancesScreen {
                 recovered_count,
                 total_amount,
             } => {
+                self.asset_lock_search_banner.take_and_clear();
                 let msg = if recovered_count == 0 {
                     "No additional unused asset locks found".to_string()
                 } else {
@@ -2030,7 +2182,7 @@ impl ScreenLike for WalletsBalancesScreen {
                         Self::format_dash(total_amount)
                     )
                 };
-                self.display_message(&msg, MessageType::Success);
+                MessageBanner::set_global(self.app_context.egui_ctx(), &msg, MessageType::Success);
             }
             crate::ui::BackendTaskSuccessResult::WalletPayment {
                 txid,
@@ -2053,7 +2205,7 @@ impl ScreenLike for WalletsBalancesScreen {
                         txid
                     )
                 };
-                self.display_message(&msg, MessageType::Success);
+                MessageBanner::set_global(self.app_context.egui_ctx(), &msg, MessageType::Success);
             }
             crate::ui::BackendTaskSuccessResult::GeneratedReceiveAddress { seed_hash, address } => {
                 if let Some(selected) = &self.selected_wallet
@@ -2079,16 +2231,25 @@ impl ScreenLike for WalletsBalancesScreen {
                 }
             }
             crate::ui::BackendTaskSuccessResult::PlatformAddressWithdrawal { .. } => {
-                self.display_message("Platform withdrawal successful. Note: It may take a few minutes for funds to appear on the Core chain.", MessageType::Success);
+                MessageBanner::set_global(
+                    self.app_context.egui_ctx(),
+                    "Platform withdrawal successful. Note: It may take a few minutes for funds to appear on the Core chain.",
+                    MessageType::Success,
+                );
             }
             crate::ui::BackendTaskSuccessResult::PlatformAddressFunded { .. } => {
                 self.fund_platform_dialog.is_processing = false;
                 self.fund_platform_dialog.status = Some("Funding successful!".to_string());
                 self.fund_platform_dialog.status_is_error = false;
-                self.display_message("Platform address funded successfully", MessageType::Success);
+                MessageBanner::set_global(
+                    self.app_context.egui_ctx(),
+                    "Platform address funded successfully",
+                    MessageType::Success,
+                );
             }
             crate::ui::BackendTaskSuccessResult::PlatformCreditsTransferred { seed_hash } => {
-                self.display_message(
+                MessageBanner::set_global(
+                    self.app_context.egui_ctx(),
                     "Platform credits transferred successfully",
                     MessageType::Success,
                 );
@@ -2111,18 +2272,70 @@ impl ScreenLike for WalletsBalancesScreen {
                     }
                 }
                 self.refresh_platform_sync_info_cache(&seed_hash);
-                self.set_message(
-                    "Successfully synced Platform balances".to_string(),
+                MessageBanner::set_global(
+                    self.app_context.egui_ctx(),
+                    "Successfully synced Platform balances",
                     MessageType::Success,
                 );
             }
             crate::ui::BackendTaskSuccessResult::Message(msg) => {
                 self.refreshing = false;
-                self.display_message(&msg, MessageType::Success);
+                MessageBanner::set_global(self.app_context.egui_ctx(), &msg, MessageType::Success);
             }
             crate::ui::BackendTaskSuccessResult::MineBlocksSuccess(count) => {
                 self.refreshing = false;
-                self.display_message(&format!("Mined {} block(s)", count), MessageType::Success);
+                MessageBanner::set_global(
+                    self.app_context.egui_ctx(),
+                    format!("Mined {} block(s)", count),
+                    MessageType::Success,
+                );
+            }
+            crate::ui::BackendTaskSuccessResult::CoreWalletsList(wallets) => {
+                let wallet_hash = self.pending_list_wallet_hash.take();
+                let is_single_key = self.pending_list_is_single_key;
+                self.pending_list_is_single_key = false;
+
+                if wallets.len() == 1 {
+                    if let Some(hash) = wallet_hash {
+                        match self.apply_core_wallet_selection(&hash, &wallets[0], is_single_key) {
+                            Ok(()) => {
+                                MessageBanner::set_global(
+                                    self.app_context.egui_ctx(),
+                                    format!(
+                                        "Auto-selected Core wallet '{}' — refreshing wallet. If you were performing another operation, please retry it.",
+                                        wallets[0]
+                                    ),
+                                    MessageType::Success,
+                                );
+                                self.refresh();
+                            }
+                            Err(e) => {
+                                MessageBanner::set_global(
+                                    self.app_context.egui_ctx(),
+                                    "Failed to save Core wallet selection",
+                                    MessageType::Error,
+                                )
+                                .with_details(e);
+                            }
+                        }
+                    }
+                } else if wallets.len() > 1 {
+                    let dialog = SelectionDialog::new(
+                        "Select Dash Core Wallet",
+                        "Multiple wallets loaded in Dash Core. Select the one to use:",
+                        wallets.clone(),
+                    );
+                    self.core_wallet_dialog = Some(dialog);
+                    self.pending_core_wallet_seed_hash = wallet_hash;
+                    self.pending_core_wallet_options = Some(wallets);
+                    self.pending_core_wallet_is_single_key = is_single_key;
+                } else {
+                    MessageBanner::set_global(
+                        self.app_context.egui_ctx(),
+                        "No wallets loaded in Dash Core",
+                        MessageType::Error,
+                    );
+                }
             }
             _ => {}
         }
@@ -2171,5 +2384,8 @@ impl ScreenLike for WalletsBalancesScreen {
         }
     }
 
-    fn refresh(&mut self) {}
+    fn refresh(&mut self) {
+        self.refreshing = false;
+        self.refresh_on_arrival();
+    }
 }

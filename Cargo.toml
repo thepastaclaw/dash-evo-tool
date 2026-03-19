@@ -16,9 +16,9 @@ egui_commonmark = "0.22.0"
 rfd = "0.17.2"
 qrcode = "0.14.1"
 nix = { version = "0.31.1", features = ["signal"] }
-eframe = { version = "0.33.3", features = ["persistence"] }
+eframe = { version = "0.33.3", features = ["persistence", "wgpu"] }
 base64 = "0.22.1"
-dash-sdk = { git = "https://github.com/dashpay/platform", rev = "0fa82e6652097d17a700d8bcc006d6b2aa922c6e", features = [
+dash-sdk = { git = "https://github.com/dashpay/platform", rev = "aa86b74f7e28dd0444fec9ceb13373bd22f768d9", features = [
     "core_key_wallet",
     "core_key_wallet_manager",
     "core_bincode",
@@ -52,7 +52,7 @@ arboard = { version = "3.6.0", default-features = false, features = [
     "windows-sys",
 ] }
 directories = "6.0.0"
-rusqlite = { version = "0.38.0", features = ["functions", "fallible_uint"] }
+rusqlite = { version = "0.38.0", features = ["bundled", "functions", "fallible_uint"] }
 dark-light = "2.0.0"
 image = { version = "0.25.6", default-features = false, features = [
     "png",
@@ -74,6 +74,8 @@ which = { version = "8.0.0" }
 tz-rs = { version = "0.7.0" }
 tempfile = "3.20.0"
 arc-swap = "1"
+urlencoding = "2"
+region = "3.0.2"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 zmq = "0.10.0"
@@ -91,6 +93,7 @@ e2e = []
 
 [dev-dependencies]
 egui_kittest = { version = "0.33.3", features = ["eframe"] }
+tokio-shared-rt = "=0.1.0"
 
 [build-dependencies]
 winres = "0.1"
@@ -111,9 +114,15 @@ name = "e2e"
 path = "tests/e2e/main.rs"
 required-features = ["e2e"]
 
+# Keep full debuginfo for our code, but only line tables for dependencies.
+# This shrinks DWARF from ~790MB to a fraction, letting gimli (std's backtrace
+# symbolizer) actually resolve panic backtraces instead of printing <unknown>.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
 [lints.rust.unexpected_cfgs]
 level = "warn"
-check-cfg = ["cfg(tokio_unstable)", "cfg(feature, values(\"testing\"))"]
+check-cfg = ["cfg(tokio_unstable)", "cfg(feature, values(\"testing\", \"e2e\"))"]
 
 [lints.clippy]
 uninlined_format_args = "allow"

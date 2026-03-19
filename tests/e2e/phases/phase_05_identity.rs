@@ -129,7 +129,8 @@ fn assert_identity_step(harness: &mut Harness<'_, AppState>, expected: WalletFun
     let stack = &harness.state().screen_stack;
     match stack.last() {
         Some(Screen::AddNewIdentityScreen(screen)) => {
-            let step = screen.step().read().unwrap();
+            let step_arc = screen.step();
+            let step = step_arc.read().unwrap();
             assert_eq!(*step, expected, "Identity screen step mismatch");
         }
         _ => panic!("Expected AddNewIdentityScreen on screen stack"),

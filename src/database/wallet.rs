@@ -26,15 +26,34 @@ use std::str::FromStr;
 impl Database {
     /// Insert a new wallet into the wallet table
     pub fn store_wallet(&self, wallet: &Wallet, network: &Network) -> rusqlite::Result<()> {
+        self.store_wallet_with_addresses(wallet, network, &[])
+    }
+
+    /// Atomically persist a wallet row and its known addresses in a single
+    /// database transaction. Prevents partial persistence where the wallet
+    /// is stored but addresses are lost on failure.
+    pub fn store_wallet_with_addresses(
+        &self,
+        wallet: &Wallet,
+        network: &Network,
+        addresses: &[(
+            &Address,
+            &DerivationPath,
+            DerivationPathReference,
+            DerivationPathType,
+        )],
+    ) -> rusqlite::Result<()> {
         let network_str = network.to_string();
 
-        // Serialize the extended public keys
         let master_ecdsa_bip44_account_0_epk_bytes =
             wallet.master_bip44_ecdsa_extended_public_key.encode();
 
-        self.execute(
-            "INSERT INTO wallet (seed_hash, encrypted_seed, salt, nonce, master_ecdsa_bip44_account_0_epk, alias, is_main, uses_password, password_hint, network, confirmed_balance, unconfirmed_balance, total_balance)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "INSERT INTO wallet (seed_hash, encrypted_seed, salt, nonce, master_ecdsa_bip44_account_0_epk, alias, is_main, uses_password, password_hint, network, confirmed_balance, unconfirmed_balance, total_balance, core_wallet_name)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 wallet.seed_hash(),
                 wallet.encrypted_seed_slice(),
@@ -48,10 +67,51 @@ impl Database {
                 network_str,
                 wallet.confirmed_balance as i64,
                 wallet.unconfirmed_balance as i64,
-                wallet.total_balance as i64
+                wallet.total_balance as i64,
+                wallet.core_wallet_name.as_deref(),
             ],
         )?;
-        Ok(())
+
+        let seed_hash = wallet.seed_hash();
+        for (address, derivation_path, path_reference, path_type) in addresses {
+            let checked_addr = check_address_for_network(address.as_unchecked().clone(), network)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO wallet_addresses
+                 (seed_hash, address, derivation_path, path_reference, path_type, balance)
+                 VALUES (?, ?, ?, ?, ?, NULL)",
+                params![
+                    seed_hash,
+                    checked_addr.to_string(),
+                    derivation_path.to_string(),
+                    *path_reference as u32,
+                    path_type.bits(),
+                ],
+            )?;
+        }
+
+        tx.commit()
+    }
+
+    /// Update the Dash Core wallet name for an HD wallet.
+    ///
+    /// Returns `Ok(true)` if exactly one row was updated, `Ok(false)` if no
+    /// matching wallet was found (0 rows), or `Err` on database errors
+    /// (including the unexpected case of >1 rows affected).
+    pub fn set_wallet_core_wallet_name(
+        &self,
+        seed_hash: &[u8; 32],
+        core_wallet_name: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE wallet SET core_wallet_name = ? WHERE seed_hash = ?",
+            params![core_wallet_name, seed_hash],
+        )?;
+        match rows {
+            0 => Ok(false),
+            1 => Ok(true),
+            n => Err(rusqlite::Error::StatementChangedRows(n)),
+        }
     }
 
     /// Update the alias of a wallet based on the seed.
@@ -419,7 +479,7 @@ impl Database {
 
         tracing::trace!("step 1: retrieve all wallets for the given network");
         let mut stmt = conn.prepare(
-            "SELECT seed_hash, encrypted_seed, salt, nonce, master_ecdsa_bip44_account_0_epk, alias, is_main, uses_password, password_hint, confirmed_balance, unconfirmed_balance, total_balance FROM wallet WHERE network = ?",
+            "SELECT seed_hash, encrypted_seed, salt, nonce, master_ecdsa_bip44_account_0_epk, alias, is_main, uses_password, password_hint, confirmed_balance, unconfirmed_balance, total_balance, core_wallet_name FROM wallet WHERE network = ?",
         )?;
 
         let mut wallets_map: BTreeMap<[u8; 32], Wallet> = BTreeMap::new();
@@ -437,6 +497,7 @@ impl Database {
             let confirmed_balance: i64 = row.get::<_, Option<i64>>(9)?.unwrap_or(0);
             let unconfirmed_balance: i64 = row.get::<_, Option<i64>>(10)?.unwrap_or(0);
             let total_balance: i64 = row.get::<_, Option<i64>>(11)?.unwrap_or(0);
+            let core_wallet_name: Option<String> = row.get(12)?;
 
             // Reconstruct the extended public keys
             let master_ecdsa_extended_public_key =
@@ -512,6 +573,7 @@ impl Database {
                     unconfirmed_balance: unconfirmed_balance as u64,
                     total_balance: total_balance as u64,
                     platform_address_info: BTreeMap::new(),
+                    core_wallet_name,
                 },
             );
 
@@ -1204,8 +1266,27 @@ fn check_address_for_network(
 #[derive(thiserror::Error, Debug)]
 /// Error type for wallet operations.
 pub enum WalletError {
-    #[error("Error in address: {0}")]
+    /// Invalid address format.
+    #[error("The wallet address could not be read. Please check the format and try again.")]
     AddressError(#[from] dashcore::address::Error),
+
+    /// HD key derivation failed (BIP-32/BIP-44).
+    #[error(
+        "Could not derive a wallet key. The wallet may be corrupted — try re-importing your recovery phrase."
+    )]
+    KeyDerivation {
+        #[from]
+        source: dash_sdk::dpp::key_wallet::bip32::Error,
+    },
+
+    /// Signature hash computation failed during transaction signing.
+    #[error("Could not prepare the transaction for signing. Please retry.")]
+    Sighash {
+        /// Zero-based index of the transaction input that failed.
+        input_index: usize,
+        #[source]
+        source: dash_sdk::dpp::dashcore::sighash::Error,
+    },
 }
 
 impl From<WalletError> for rusqlite::Error {

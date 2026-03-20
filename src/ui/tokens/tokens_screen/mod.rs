@@ -2790,6 +2790,7 @@ impl ScreenLike for TokensScreen {
     fn refresh_on_arrival(&mut self) {
         self.selected_token = None;
         self.should_reset_collapsing_states = true;
+        self.token_search_query = None;
 
         self.all_known_tokens = self
             .app_context

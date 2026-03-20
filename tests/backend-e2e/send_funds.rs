@@ -100,23 +100,41 @@ async fn test_send_and_receive_funds() {
         request,
     });
 
+    // Snapshot A's balance after sending to B (before return payment)
+    let a_balance_after_send = {
+        let wallets = app_context.wallets().read().expect("wallets lock");
+        wallets
+            .get(&hash_a)
+            .map(|w| w.read().expect("lock").total_balance_duffs())
+            .unwrap_or(0)
+    };
+    tracing::info!(
+        "A balance after sending to B: {} duffs",
+        a_balance_after_send
+    );
+
     let _result = run_task(app_context, task)
         .await
         .expect("Payment B->A should succeed");
 
-    // Verify A received the return payment
+    // Verify A received the return payment (balance must increase above post-send snapshot)
     let a_balance_after_return = wait_for_balance(
         app_context,
         hash_a,
-        send_amount, // A should have at least send_amount back (minus fee from B)
+        a_balance_after_send + 1, // Must exceed post-send balance (return payment minus fee)
         Duration::from_secs(120),
     )
     .await
     .expect("A should receive return funds from B");
 
     tracing::info!(
-        "A balance after round-trip: {} duffs",
-        a_balance_after_return
+        "A balance after round-trip: {} duffs (was {} after send)",
+        a_balance_after_return,
+        a_balance_after_send,
+    );
+    assert!(
+        a_balance_after_return > a_balance_after_send,
+        "A's balance should increase after receiving return payment"
     );
 
     tracing::info!("Round-trip payment completed successfully");

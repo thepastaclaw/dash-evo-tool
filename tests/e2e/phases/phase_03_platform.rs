@@ -115,11 +115,11 @@ fn run_contract_fetch(harness: &mut Harness<'_, AppState>) {
         // Enter the DPNS contract ID
         type_into_text_input(harness, 0, DPNS_CONTRACT_ID);
 
-        // Click "Fetch Contracts" submit button
+        // Click "Add Contracts" submit button
         harness
-            .query_by_label("Fetch Contracts")
-            .or_else(|| harness.query_by_label_contains("Fetch Contracts"))
-            .expect("'Fetch Contracts' button must be visible on Add Contracts screen")
+            .query_by_label("Add Contracts")
+            .or_else(|| harness.query_by_label_contains("Add Contracts"))
+            .expect("'Add Contracts' button must be visible on Add Contracts screen")
             .click();
         harness.run_steps(SETTLE_STEPS);
 

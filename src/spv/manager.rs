@@ -2,7 +2,7 @@ use super::error::{SpvError, SpvResult};
 use crate::config::NetworkConfig;
 use crate::model::wallet::WalletSeedHash;
 use crate::utils::tasks::TaskManager;
-use dash_sdk::dash_spv::client::interface::DashSpvClientInterface;
+use arc_swap::ArcSwapOption;
 use dash_sdk::dash_spv::network::NetworkEvent;
 use dash_sdk::dash_spv::network::PeerNetworkManager;
 use dash_sdk::dash_spv::storage::DiskStorageManager;
@@ -148,8 +148,9 @@ pub struct SpvManager {
     wallet: Arc<AsyncRwLock<WalletManager<ManagedWalletInfo>>>,
     // Storage manager for direct access to SPV data (shared component from client)
     storage: Arc<Mutex<Option<Arc<tokio::sync::Mutex<DiskStorageManager>>>>>,
-    // Interface for communicating with the running SPV client (quorum lookups, etc.)
-    spv_interface: Mutex<Option<DashSpvClientInterface>>,
+    // Shared reference to the running SPV client (for quorum lookups, etc.)
+    // ArcSwapOption gives wait-free reads (quorum lookups) and atomic set/clear on start/stop.
+    spv_client: ArcSwapOption<SpvClient>,
     status: Arc<RwLock<SpvStatus>>,
     last_error: Arc<RwLock<Option<String>>>,
     started_at: Arc<RwLock<Option<SystemTime>>>,
@@ -297,7 +298,7 @@ impl SpvManager {
                 network,
             ))),
             storage: Arc::new(Mutex::new(None)),
-            spv_interface: Mutex::new(None),
+            spv_client: ArcSwapOption::empty(),
             status: Arc::new(RwLock::new(SpvStatus::Idle)),
             last_error: Arc::new(RwLock::new(None)),
             started_at: Arc::new(RwLock::new(None)),
@@ -551,7 +552,7 @@ impl SpvManager {
             *storage_guard = None;
         }
 
-        // spv_interface is cleared asynchronously when the client stops; no action needed here.
+        // spv_client is cleared asynchronously when the client stops; no action needed here.
 
         if let Ok(mut request_guard) = self.request_tx.lock() {
             *request_guard = None;
@@ -629,17 +630,15 @@ impl SpvManager {
             core_chain_locked_height
         );
 
-        let interface = self
-            .spv_interface
-            .lock()
-            .map_err(|_| "SPV interface lock poisoned".to_string())?
-            .clone()
+        let client = self
+            .spv_client
+            .load_full()
             .ok_or_else(|| "SPV client not initialized".to_string())?;
 
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                interface
-                    .get_quorum_by_height(core_chain_locked_height, llmq_type, qh)
+                client
+                    .get_quorum_at_height(core_chain_locked_height, llmq_type, qh)
                     .await
                     .map(|q| {
                         tracing::debug!(
@@ -832,8 +831,11 @@ impl SpvManager {
             }
         }
 
+        // Store the client reference for quorum lookups (wait-free reads via ArcSwap)
+        self.spv_client.store(Some(Arc::clone(&client)));
+
         // Subscribe to sync events (broadcast)
-        let sync_rx = client.subscribe_sync_events();
+        let sync_rx = client.subscribe_sync_events().await;
         self.spawn_sync_event_handler(sync_rx);
 
         // Subscribe to wallet events (broadcast from WalletManager)
@@ -844,11 +846,11 @@ impl SpvManager {
         }
 
         // Subscribe to network events (broadcast)
-        let net_rx = client.subscribe_network_events();
+        let net_rx = client.subscribe_network_events().await;
         self.spawn_network_event_handler(net_rx);
 
         // Set up progress handler using watch channel
-        let progress_rx = client.subscribe_progress();
+        let progress_rx = client.subscribe_progress().await;
         self.spawn_progress_watcher(progress_rx);
 
         // Set up request handler with access to shared components
@@ -862,28 +864,13 @@ impl SpvManager {
         // Spawn request handler in a separate task
         self.spawn_request_handler(request_rx, stop_token.clone());
 
-        // Create command channel and store the interface for quorum lookups
-        let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
-        if let Ok(mut guard) = self.spv_interface.lock() {
-            *guard = Some(DashSpvClientInterface::new(command_tx));
-        }
-
-        // Unwrap the Arc to get ownership — must be the last use of `client`
-        let client = Arc::try_unwrap(client)
-            .map_err(|_| "SPV client has outstanding references".to_string())?;
-
         let _ = self.write_status(SpvStatus::Syncing);
 
         // Run the client — handles start, monitoring, and stop internally
-        let result = self
-            .clone()
-            .run_client(client, command_rx, stop_token)
-            .await;
+        let result = self.clone().run_client(client, stop_token).await;
 
-        // Clear the client interface and network manager since the client is done
-        if let Ok(mut guard) = self.spv_interface.lock() {
-            *guard = None;
-        }
+        // Clear the client reference and network manager since the client is done
+        self.spv_client.store(None);
         {
             let mut nm_guard = self.network_manager.write().await;
             *nm_guard = None;
@@ -906,16 +893,13 @@ impl SpvManager {
 
     async fn run_client(
         self: Arc<Self>,
-        client: SpvClient,
-        command_rx: tokio::sync::mpsc::UnboundedReceiver<
-            dash_sdk::dash_spv::client::interface::DashSpvClientCommand,
-        >,
+        client: Arc<SpvClient>,
         stop_token: CancellationToken,
     ) -> Result<(), String> {
         // client.run() handles start, monitoring loop, and stop internally.
         // It returns when the cancellation token fires or an error occurs.
         let result = client
-            .run(command_rx, stop_token)
+            .run(stop_token)
             .await
             .map_err(|e| format!("SPV client error: {e}"));
 

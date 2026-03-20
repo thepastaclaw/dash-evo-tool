@@ -1793,10 +1793,7 @@ impl NetworkChooserScreen {
                 }
             }
             SyncState::Synced => 1.0,
-            SyncState::Initializing
-            | SyncState::WaitingForConnections
-            | SyncState::WaitForEvents
-            | SyncState::Error => 0.0,
+            SyncState::WaitingForConnections | SyncState::WaitForEvents | SyncState::Error => 0.0,
         }
     }
 
@@ -1830,10 +1827,7 @@ impl NetworkChooserScreen {
                 }
             }
             SyncState::Synced => 1.0,
-            SyncState::Initializing
-            | SyncState::WaitingForConnections
-            | SyncState::WaitForEvents
-            | SyncState::Error => 0.0,
+            SyncState::WaitingForConnections | SyncState::WaitForEvents | SyncState::Error => 0.0,
         }
     }
 
@@ -1870,10 +1864,7 @@ impl NetworkChooserScreen {
                 }
             }
             SyncState::Synced => 1.0,
-            SyncState::Initializing
-            | SyncState::WaitingForConnections
-            | SyncState::WaitForEvents
-            | SyncState::Error => 0.0,
+            SyncState::WaitingForConnections | SyncState::WaitForEvents | SyncState::Error => 0.0,
         }
     }
 
@@ -1896,10 +1887,7 @@ impl NetworkChooserScreen {
                 (mn.current_height() as f32 / target as f32).clamp(0.0, 1.0)
             }
             SyncState::Synced => 1.0,
-            SyncState::Initializing
-            | SyncState::WaitingForConnections
-            | SyncState::WaitForEvents
-            | SyncState::Error => 0.0,
+            SyncState::WaitingForConnections | SyncState::WaitForEvents | SyncState::Error => 0.0,
         }
     }
 
@@ -2015,7 +2003,6 @@ impl NetworkChooserScreen {
             "Sync complete".to_string()
         } else {
             match progress.state() {
-                SyncState::Initializing => "Initializing...".to_string(),
                 SyncState::WaitingForConnections => "Connecting to peers".to_string(),
                 SyncState::WaitForEvents => "Querying peer heights".to_string(),
                 SyncState::Error => "Sync error".to_string(),

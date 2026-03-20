@@ -25,7 +25,7 @@ use dash_sdk::dpp::fee::Credits;
 use dash_sdk::dpp::key_wallet::Network as WalletNetwork;
 use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::ManagedWalletInfo;
 use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::coin_selection::SelectionStrategy;
-use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::fee::{FeeLevel, FeeRate};
+use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::fee::FeeRate;
 use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::transaction_builder::{
     BuilderError, TransactionBuilder,
 };
@@ -791,7 +791,7 @@ impl AppContext {
 
         // Build the transaction using TransactionBuilder
         let mut builder = TransactionBuilder::new()
-            .set_fee_level(FeeLevel::Custom(FeeRate::normal()))
+            .set_fee_rate(FeeRate::normal())
             .set_change_address(change_address.clone());
 
         for (address, amount) in recipients {

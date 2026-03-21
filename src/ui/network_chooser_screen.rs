@@ -10,17 +10,18 @@ use crate::spv::{CoreBackendMode, SpvStatus, SpvStatusSnapshot};
 use crate::ui::components::MessageBanner;
 use crate::ui::components::component_trait::Component;
 use crate::ui::components::left_panel::add_left_panel;
+use crate::ui::components::password_input::PasswordInput;
 use crate::ui::components::styled::{
     ConfirmationDialog, ConfirmationStatus, StyledCard, StyledCheckbox, island_central_panel,
 };
 use crate::ui::components::top_panel::add_top_panel;
-use crate::ui::theme::{DashColors, Shape, ThemeMode};
+use crate::ui::theme::{DashColors, ResponseExt, Shape, ThemeMode};
 use crate::ui::{MessageType, RootScreenType, ScreenLike};
 use crate::utils::path::format_path_for_display;
 use dash_sdk::dash_spv::sync::{ProgressPercentage, SyncProgress as SpvSyncProgress, SyncState};
 use dash_sdk::dpp::dashcore::Network;
 use dash_sdk::dpp::identity::TimestampMillis;
-use eframe::egui::{self, Color32, Context, Frame, Margin, RichText, Ui};
+use eframe::egui::{self, Context, Ui};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -86,11 +87,10 @@ pub struct NetworkChooserScreen {
     pub testnet_app_context: Option<Arc<AppContext>>,
     pub devnet_app_context: Option<Arc<AppContext>>,
     pub local_app_context: Option<Arc<AppContext>>,
-    pub local_network_dashmate_password: String,
+    dashmate_password_input: PasswordInput,
     pub current_network: Network,
     pub recheck_time: Option<TimestampMillis>,
     custom_dash_qt_path: Option<PathBuf>,
-    custom_dash_qt_error_message: Option<String>,
     overwrite_dash_conf: bool,
     disable_zmq: bool,
     developer_mode: bool,
@@ -121,18 +121,15 @@ impl NetworkChooserScreen {
         current_network: Network,
         overwrite_dash_conf: bool,
     ) -> Self {
-        let local_network_dashmate_password = if let Ok(config) = Config::load() {
-            if let Some(local_config) = config.config_for_network(Network::Regtest) {
-                local_config.core_rpc_password.clone()
-            } else {
-                "".to_string()
-            }
-        } else {
-            "".to_string()
-        };
+        let mut dashmate_password_input = PasswordInput::new().with_hint_text("Core RPC password");
+        if let Ok(config) = Config::load_from(&mainnet_app_context.data_dir)
+            && let Some(local_config) = config.config_for_network(Network::Regtest)
+        {
+            dashmate_password_input.set_text(local_config.core_rpc_password.clone());
+        }
 
         let current_context = match current_network {
-            Network::Dash => mainnet_app_context,
+            Network::Mainnet => mainnet_app_context,
             Network::Testnet => testnet_app_context.unwrap_or(mainnet_app_context),
             Network::Devnet => devnet_app_context.unwrap_or(mainnet_app_context),
             Network::Regtest => local_app_context.unwrap_or(mainnet_app_context),
@@ -160,7 +157,7 @@ impl NetworkChooserScreen {
             .unwrap_or(true);
 
         let mut backend_modes = HashMap::new();
-        backend_modes.insert(Network::Dash, mainnet_app_context.core_backend_mode());
+        backend_modes.insert(Network::Mainnet, mainnet_app_context.core_backend_mode());
         backend_modes.insert(
             Network::Testnet,
             testnet_app_context
@@ -185,11 +182,10 @@ impl NetworkChooserScreen {
             testnet_app_context: testnet_app_context.cloned(),
             devnet_app_context: devnet_app_context.cloned(),
             local_app_context: local_app_context.cloned(),
-            local_network_dashmate_password,
+            dashmate_password_input,
             current_network,
             recheck_time: None,
             custom_dash_qt_path,
-            custom_dash_qt_error_message: None,
             overwrite_dash_conf,
             disable_zmq,
             developer_mode,
@@ -214,7 +210,7 @@ impl NetworkChooserScreen {
 
     pub fn context_for_network(&self, network: Network) -> &Arc<AppContext> {
         match network {
-            Network::Dash => &self.mainnet_app_context,
+            Network::Mainnet => &self.mainnet_app_context,
             Network::Testnet if self.testnet_app_context.is_some() => {
                 self.testnet_app_context.as_ref().unwrap()
             }
@@ -358,7 +354,7 @@ impl NetworkChooserScreen {
                     };
 
                     let network_text = match self.current_network {
-                        Network::Dash => "Mainnet",
+                        Network::Mainnet => "Mainnet",
                         Network::Testnet => "Testnet",
                         Network::Devnet => "Devnet",
                         Network::Regtest => "Local",
@@ -375,12 +371,12 @@ impl NetworkChooserScreen {
                                 if ui
                                     .selectable_value(
                                         &mut self.current_network,
-                                        Network::Dash,
+                                        Network::Mainnet,
                                         "Mainnet",
                                     )
                                     .clicked()
                                 {
-                                    app_action = AppAction::SwitchNetwork(Network::Dash);
+                                    app_action = AppAction::SwitchNetwork(Network::Mainnet);
                                 }
                                 if self.testnet_app_context.is_some()
                                     && ui
@@ -419,7 +415,9 @@ impl NetworkChooserScreen {
                         });
 
                         if is_spv_connected {
-                            response.response.on_hover_text("Disconnect from SPV first");
+                            response
+                                .response
+                                .disabled_tooltip("Disconnect from SPV first");
                         }
                     });
 
@@ -446,7 +444,7 @@ impl NetworkChooserScreen {
                 ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.local_network_dashmate_password);
+                    self.dashmate_password_input.show(ui);
 
                     let save_clicked = ui.button("Save").clicked();
 
@@ -454,7 +452,7 @@ impl NetworkChooserScreen {
                     if ui.button("Auto Update").clicked() {
                         match read_dashmate_rpc_password("local_seed") {
                             Ok(password) => {
-                                self.local_network_dashmate_password = password;
+                                self.dashmate_password_input.set_text(password);
                                 auto_update_succeeded = true;
                             }
                             Err(e) => {
@@ -465,16 +463,18 @@ impl NetworkChooserScreen {
                     }
 
                     if (save_clicked || auto_update_succeeded)
-                        && let Ok(mut config) = Config::load()
+                        && let Ok(mut config) =
+                            Config::load_from(&self.mainnet_app_context.data_dir)
                         && let Some(local_cfg) = config.config_for_network(Network::Regtest).clone()
                     {
-                        let updated_local_config = local_cfg
-                            .update_core_rpc_password(self.local_network_dashmate_password.clone());
+                        let updated_local_config = local_cfg.update_core_rpc_password(
+                            self.dashmate_password_input.text().to_string(),
+                        );
                         config.update_config_for_network(
                             Network::Regtest,
                             updated_local_config.clone(),
                         );
-                        if let Err(e) = config.save() {
+                        if let Err(e) = config.save(&self.mainnet_app_context.data_dir) {
                             tracing::error!("Failed to save config to .env: {e}");
                         }
 
@@ -516,13 +516,14 @@ impl NetworkChooserScreen {
                 .entry(self.current_network)
                 .or_insert(CoreBackendMode::Rpc);
 
-            let ctx = self.current_app_context();
+            let ctx = self.current_app_context().clone();
             let status = ctx.connection_status();
             let disable_zmq = status.disable_zmq();
             let rpc_online = status.rpc_online();
             let zmq_connected = status.zmq_connected();
             let spv_status = status.spv_status();
             let spv_connected = ConnectionStatus::spv_connected(spv_status);
+            let spv_error_detail = status.spv_last_error();
             let snapshot = if current_backend_mode == CoreBackendMode::Spv {
                 Some(ctx.spv_manager().status().clone())
             } else {
@@ -734,7 +735,15 @@ impl NetworkChooserScreen {
                         } else {
                             DashColors::ERROR
                         };
-                        ui.colored_label(color, spv_status.to_string());
+                        let label = if spv_status == SpvStatus::Error {
+                            spv_error_detail
+                                .as_ref()
+                                .map(|e| format!("Error: {e}"))
+                                .unwrap_or_else(|| "Error".to_string())
+                        } else {
+                            spv_status.to_string()
+                        };
+                        ui.colored_label(color, label);
                     });
 
                     ui.horizontal(|ui| {
@@ -901,8 +910,6 @@ impl NetworkChooserScreen {
                         let previous_custom_dash_qt_path = self.custom_dash_qt_path.clone();
                         let file_name = path.file_name().and_then(|f| f.to_str());
                         if let Some(file_name) = file_name {
-                            self.custom_dash_qt_error_message = None;
-
                             // Handle macOS .app bundles
                             let resolved_path = if cfg!(target_os = "macos")
                                 && path.extension().and_then(|s| s.to_str()) == Some("app")
@@ -925,12 +932,12 @@ impl NetworkChooserScreen {
 
                             if is_valid {
                                 self.custom_dash_qt_path = Some(resolved_path);
-                                self.custom_dash_qt_error_message = None;
                                 if let Err(e) = self.save() {
                                     tracing::warn!("Failed to save Dash-Qt path setting: {}", e);
-                                    self.custom_dash_qt_error_message = Some(
-                                        "Failed to save Dash-Qt path setting. Please try again."
-                                            .to_string(),
+                                    MessageBanner::set_global(
+                                        ui.ctx(),
+                                        "Failed to save Dash-Qt path setting. Please try again.",
+                                        MessageType::Error,
                                     );
                                     self.custom_dash_qt_path = previous_custom_dash_qt_path;
                                 }
@@ -942,10 +949,14 @@ impl NetworkChooserScreen {
                                 } else {
                                     "dash-qt"
                                 };
-                                self.custom_dash_qt_error_message = Some(format!(
-                                    "Invalid file: Please select a valid '{}'.",
-                                    required_file_name
-                                ));
+                                MessageBanner::set_global(
+                                    ui.ctx(),
+                                    format!(
+                                        "Invalid file: Please select a valid '{}'.",
+                                        required_file_name
+                                    ),
+                                    MessageType::Error,
+                                );
                             }
                         }
                     }
@@ -953,12 +964,12 @@ impl NetworkChooserScreen {
                     if self.custom_dash_qt_path.is_some() && ui.button("Clear").clicked() {
                         let previous_custom_dash_qt_path = self.custom_dash_qt_path.clone();
                         self.custom_dash_qt_path = Some(PathBuf::new());
-                        self.custom_dash_qt_error_message = None;
                         if let Err(e) = self.save() {
                             tracing::warn!("Failed to save cleared Dash-Qt path setting: {}", e);
-                            self.custom_dash_qt_error_message = Some(
-                                "Failed to clear Dash-Qt path setting. Please try again."
-                                    .to_string(),
+                            MessageBanner::set_global(
+                                ui.ctx(),
+                                "Failed to clear Dash-Qt path setting. Please try again.",
+                                MessageType::Error,
                             );
                             self.custom_dash_qt_path = previous_custom_dash_qt_path;
                         }
@@ -977,24 +988,6 @@ impl NetworkChooserScreen {
                         );
                     });
                 }
-                if let Some(ref error) = self.custom_dash_qt_error_message {
-                    let error_color = Color32::from_rgb(255, 100, 100);
-                    let error = error.clone();
-                    Frame::new()
-                        .fill(error_color.gamma_multiply(0.1))
-                        .inner_margin(Margin::symmetric(10, 8))
-                        .corner_radius(5.0)
-                        .stroke(egui::Stroke::new(1.0, error_color))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(&error).color(error_color));
-                                ui.add_space(10.0);
-                                if ui.small_button("Dismiss").clicked() {
-                                    self.custom_dash_qt_error_message = None;
-                                }
-                            });
-                        });
-                }
 
                 // Configuration Options
                 ui.add_space(10.0);
@@ -1012,16 +1005,15 @@ impl NetworkChooserScreen {
                     if StyledCheckbox::new(&mut self.overwrite_dash_conf, "Overwrite dash.conf")
                         .show(ui)
                         .clicked()
+                        && let Err(e) = self.save()
                     {
-                        self.custom_dash_qt_error_message = None;
-                        if let Err(e) = self.save() {
-                            tracing::warn!("Failed to save overwrite_dash_conf setting: {}", e);
-                            self.custom_dash_qt_error_message = Some(
-                                "Failed to save overwrite dash.conf setting. Please try again."
-                                    .to_string(),
-                            );
-                            self.overwrite_dash_conf = previous_overwrite_dash_conf;
-                        }
+                        tracing::warn!("Failed to save overwrite_dash_conf setting: {}", e);
+                        MessageBanner::set_global(
+                            ui.ctx(),
+                            "Failed to save overwrite dash.conf setting. Please try again.",
+                            MessageType::Error,
+                        );
+                        self.overwrite_dash_conf = previous_overwrite_dash_conf;
                     }
                     ui.label(
                         egui::RichText::new("Auto-configure required settings")
@@ -1047,8 +1039,9 @@ impl NetworkChooserScreen {
                 ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
-                    if StyledCheckbox::new(&mut self.developer_mode, "Developer mode")
+                    if StyledCheckbox::new(&mut self.developer_mode, "Expert mode")
                         .show(ui)
+                        .clickable_tooltip("Show advanced options for power users and developers")
                         .clicked()
                     {
                         // Always update all contexts first to keep UI in sync
@@ -1065,9 +1058,9 @@ impl NetworkChooserScreen {
                         }
 
                         // Persist to config file (non-blocking for UI)
-                        if let Ok(mut config) = Config::load() {
+                        if let Ok(mut config) = Config::load_from(&self.mainnet_app_context.data_dir) {
                             config.developer_mode = Some(self.developer_mode);
-                            if let Err(e) = config.save() {
+                            if let Err(e) = config.save(&self.mainnet_app_context.data_dir) {
                                 tracing::error!("Failed to save config: {e}");
                             }
                         }
@@ -1080,7 +1073,7 @@ impl NetworkChooserScreen {
                             if self.mainnet_app_context.core_backend_mode() == CoreBackendMode::Spv {
                                 self.mainnet_app_context.set_core_backend_mode(CoreBackendMode::Rpc);
                             }
-                            self.backend_modes.insert(Network::Dash, CoreBackendMode::Rpc);
+                            self.backend_modes.insert(Network::Mainnet, CoreBackendMode::Rpc);
 
                             if let Some(ref ctx) = self.testnet_app_context {
                                 ctx.stop_spv();
@@ -1654,7 +1647,7 @@ impl NetworkChooserScreen {
         let mut button_response = ui.add_enabled(!is_active, clear_button);
         if is_active {
             button_response =
-                button_response.on_disabled_hover_text("Stop the SPV client before clearing data");
+                button_response.disabled_tooltip("Stop the SPV client before clearing data");
         }
 
         if button_response.clicked() {
@@ -1769,7 +1762,7 @@ impl NetworkChooserScreen {
 
     fn current_network_label(&self) -> &'static str {
         match self.current_network {
-            Network::Dash => "Mainnet",
+            Network::Mainnet => "Mainnet",
             Network::Testnet => "Testnet",
             Network::Devnet => "Devnet",
             Network::Regtest => "Local",
@@ -1809,10 +1802,7 @@ impl NetworkChooserScreen {
                 }
             }
             SyncState::Synced => 1.0,
-            SyncState::Initializing
-            | SyncState::WaitingForConnections
-            | SyncState::WaitForEvents
-            | SyncState::Error => 0.0,
+            SyncState::WaitingForConnections | SyncState::WaitForEvents | SyncState::Error => 0.0,
         }
     }
 
@@ -1846,10 +1836,7 @@ impl NetworkChooserScreen {
                 }
             }
             SyncState::Synced => 1.0,
-            SyncState::Initializing
-            | SyncState::WaitingForConnections
-            | SyncState::WaitForEvents
-            | SyncState::Error => 0.0,
+            SyncState::WaitingForConnections | SyncState::WaitForEvents | SyncState::Error => 0.0,
         }
     }
 
@@ -1886,10 +1873,7 @@ impl NetworkChooserScreen {
                 }
             }
             SyncState::Synced => 1.0,
-            SyncState::Initializing
-            | SyncState::WaitingForConnections
-            | SyncState::WaitForEvents
-            | SyncState::Error => 0.0,
+            SyncState::WaitingForConnections | SyncState::WaitForEvents | SyncState::Error => 0.0,
         }
     }
 
@@ -1912,10 +1896,7 @@ impl NetworkChooserScreen {
                 (mn.current_height() as f32 / target as f32).clamp(0.0, 1.0)
             }
             SyncState::Synced => 1.0,
-            SyncState::Initializing
-            | SyncState::WaitingForConnections
-            | SyncState::WaitForEvents
-            | SyncState::Error => 0.0,
+            SyncState::WaitingForConnections | SyncState::WaitForEvents | SyncState::Error => 0.0,
         }
     }
 
@@ -1958,7 +1939,7 @@ impl NetworkChooserScreen {
 
     fn has_context_for(&self, network: Network) -> bool {
         match network {
-            Network::Dash => true,
+            Network::Mainnet => true,
             Network::Testnet => self.testnet_app_context.is_some(),
             Network::Devnet => self.devnet_app_context.is_some(),
             Network::Regtest => self.local_app_context.is_some(),
@@ -2034,9 +2015,7 @@ impl NetworkChooserScreen {
                 SyncState::WaitingForConnections => "Connecting to peers".to_string(),
                 SyncState::WaitForEvents => "Querying peer heights".to_string(),
                 SyncState::Error => "Sync error".to_string(),
-                SyncState::Initializing | SyncState::Syncing | SyncState::Synced => {
-                    "Syncing...".to_string()
-                }
+                SyncState::Syncing | SyncState::Synced => "Syncing...".to_string(),
             }
         };
 
@@ -2061,8 +2040,10 @@ impl ScreenLike for NetworkChooserScreen {
             self.theme_preference = settings.theme_mode;
         }
 
-        self.backend_modes
-            .insert(Network::Dash, self.mainnet_app_context.core_backend_mode());
+        self.backend_modes.insert(
+            Network::Mainnet,
+            self.mainnet_app_context.core_backend_mode(),
+        );
         if let Some(ctx) = &self.testnet_app_context {
             self.backend_modes
                 .insert(Network::Testnet, ctx.core_backend_mode());

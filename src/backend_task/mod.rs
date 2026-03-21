@@ -103,8 +103,21 @@ pub enum BackendTaskSuccessResult {
     // General results
     None,
     Refresh,
-    Message(String), // Used for: progress messages during long operations, placeholder messages for
+    Message(String), // Used for: placeholder messages for
     // not-yet-implemented functionality, and DashPay operations that would need their own typed variants.
+    /// Progress updates during long-running operations (e.g. batch identity search).
+    /// By convention, the app routes `Progress` results to the visible screen's
+    /// `display_task_result` without creating a global banner at the app level
+    /// (unlike `Message`). Screens may create a banner handle on first receipt
+    /// and update it in-place on subsequent updates to avoid stacking.
+    Progress {
+        /// Human-readable progress message
+        message: String,
+        /// Current step (1-based)
+        current: u32,
+        /// Total steps
+        total: u32,
+    },
     WalletPayment {
         txid: String,
         /// List of (address, amount) pairs for each recipient
@@ -250,6 +263,10 @@ pub enum BackendTaskSuccessResult {
     ContractNotFound,
     TokenNotFound,
     ProofErrorLogged,
+    /// Contract was saved to the local database despite a proof verification error.
+    /// Sent by `register_data_contract` / `update_data_contract` when the contract was
+    /// successfully fetched from Platform and stored after a `DriveProofError`.
+    ContractSavedAfterProofError,
 
     // Wallet operation results (replacing string messages)
     RefreshedWallet {
@@ -271,6 +288,9 @@ pub enum BackendTaskSuccessResult {
 
     // Mining results (dev mode, Regtest/Devnet only)
     MineBlocksSuccess(u64),
+
+    // Core wallet list (async fetch of loaded Core wallets)
+    CoreWalletsList(Vec<String>),
 }
 
 impl BackendTaskSuccessResult {}
@@ -360,7 +380,7 @@ impl AppContext {
     async fn run_wallet_task(
         self: &Arc<Self>,
         task: WalletTask,
-    ) -> Result<BackendTaskSuccessResult, String> {
+    ) -> Result<BackendTaskSuccessResult, TaskError> {
         match task {
             WalletTask::GenerateReceiveAddress { seed_hash } => {
                 self.generate_receive_address(seed_hash).await

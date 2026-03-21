@@ -14,7 +14,9 @@ fn create_test_harness() -> (
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     let _guard = rt.enter();
     let harness = Harness::builder().with_max_steps(200).build_eframe(|ctx| {
-        dash_evo_tool::app::AppState::new(ctx.egui_ctx.clone()).with_animations(false)
+        dash_evo_tool::app::AppState::new(ctx.egui_ctx.clone())
+            .expect("Failed to create AppState")
+            .with_animations(false)
     });
     (rt, harness)
 }

@@ -8,6 +8,14 @@ use dash_evo_tool::ui::{MessageType, Screen, ScreenLike, ScreenType};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
+/// Phase 5: Identity screen validation tests.
+///
+/// Runs client-side UI validation sub-tests for the identity creation screen
+/// (zero-amount guard, no-key rejection, error display/dismiss, step reset on
+/// error).  **Actual identity creation is not performed** — it requires an asset
+/// lock transaction confirmed in a block, which in turn depends on SPV mempool
+/// support that has not yet landed.  `ctx.identity_id` is therefore never set by
+/// this phase, and Phase 6 (DPNS registration) is skipped for the same reason.
 pub fn run(harness: &mut Harness<'_, AppState>, ctx: &mut TestContext) {
     // Run validation sub-tests first — these are pure client-side (no network
     // calls) and should run regardless of SPV sync state.

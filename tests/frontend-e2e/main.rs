@@ -38,7 +38,13 @@ fn e2e_testnet_journey() {
         println!("\n=== Phase 4: Token Search ===");
         phases::phase_04_tokens::run(&mut harness, &mut ctx);
 
-        println!("\n=== Phase 5: Identity Validation ===");
+        // Phase 5 runs client-side UI validation sub-tests only (zero-amount guard,
+        // no-key rejection, error display/dismiss, step reset on error).
+        // Actual identity creation is skipped — it requires an asset lock transaction
+        // confirmed in a block, which depends on SPV mempool support not yet landed.
+        println!(
+            "\n=== Phase 5: Identity Screen Validation (creation skipped — pending SPV mempool) ==="
+        );
         phases::phase_05_identity::run(&mut harness, &mut ctx);
 
         // Phase 6 (DPNS) skipped — Phase 5 runs validation tests but actual

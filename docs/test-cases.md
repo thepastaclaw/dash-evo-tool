@@ -32,8 +32,8 @@ Perform these steps before running any test cases. If running TC-NET-010-01 (onb
 ### 1. Configure SPV Mode
 
 1. Click **"Settings"** in the left sidebar.
-2. Check the **"Expert mode"** checkbox and click **"Save"**.
-3. Under the now-visible **Core backend mode**, select **"SPV Client"**.
+2. Check the **"Developer mode"** checkbox and click **"Save"**.
+3. Under the now-visible **Connection Type**, select **"SPV Client"**.
 4. Click **"Save"**.
 5. Wait for the connection status indicator (top bar) to turn green.
 
@@ -128,18 +128,18 @@ Perform these steps before running any test cases. If running TC-NET-010-01 (onb
 | **Expected Result** | Theme changes apply after clicking **"Save"**. UI is readable in both modes. |
 | **Post-Condition** | Set theme to preferred value and click **"Save"**. |
 
-### TC-NET-005-01: Toggle Expert mode
+### TC-NET-005-01: Toggle Developer mode
 
 | Field | Value |
 |-------|-------|
 | **Use Case ID** | NET-005 |
 | **Test Case ID** | TC-NET-005-01 |
-| **Short Description** | Enable and disable Expert mode |
+| **Short Description** | Enable and disable Developer mode |
 | **Pre-Conditions** | DET running |
-| **Test Steps** | 1. Click **"Settings"** in the left sidebar.<br>2. Locate the **"Expert mode"** checkbox.<br>3. If unchecked, check **"Expert mode"** and click **"Save"**.<br>4. Verify the **Core backend mode** selector appears (shows **"SPV Client"** or **"Dash Core RPC"**).<br>5. Navigate to **"Wallets"** — verify additional developer elements appear (e.g., address tables, refresh controls).<br>6. Return to **"Settings"**.<br>7. Uncheck **"Expert mode"** and click **"Save"**.<br>8. Verify the **Core backend mode** selector disappears.<br>9. Navigate to **"Wallets"** — verify developer elements are hidden. |
+| **Test Steps** | 1. Click **"Settings"** in the left sidebar.<br>2. Locate the **"Developer mode"** checkbox.<br>3. If unchecked, check **"Developer mode"** and click **"Save"**.<br>4. Verify the **Connection Type** selector appears (shows **"SPV Client"** or **"Dash Core RPC"**).<br>5. Navigate to **"Wallets"** — verify additional developer elements appear (e.g., address tables, refresh controls).<br>6. Return to **"Settings"**.<br>7. Uncheck **"Developer mode"** and click **"Save"**.<br>8. Verify the **Connection Type** selector disappears.<br>9. Navigate to **"Wallets"** — verify developer elements are hidden. |
 | **Test Data** | N/A |
-| **Expected Result** | Checking **"Expert mode"** reveals advanced controls (backend mode selector, address tables). Unchecking hides them. |
-| **Post-Condition** | Re-enable **"Expert mode"** and click **"Save"** (required for SPV backend selection). |
+| **Expected Result** | Checking **"Developer mode"** reveals advanced controls (backend mode selector, address tables). Unchecking hides them. |
+| **Post-Condition** | Re-enable **"Developer mode"** and click **"Save"** (required for SPV backend selection). |
 
 ---
 
@@ -632,6 +632,6 @@ Execute tests in this order to build on each other and minimize setup/cleanup:
 | 29 | TC-DEV-005-01 | Platform info |
 | 30 | TC-NET-001-01 | Network selection |
 | 31 | TC-NET-004-01 | Theme toggle |
-| 32 | TC-NET-005-01 | Expert mode |
+| 32 | TC-NET-005-01 | Developer mode |
 | 33 | TC-WAL-007-01 | Remove wallet (cleanup) |
 | — | **[Session Cleanup](#session-cleanup)** | Return funds to bank, remove test wallets |

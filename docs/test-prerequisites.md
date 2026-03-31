@@ -86,6 +86,7 @@ TESTNET_core_rpc_port=19998
 TESTNET_core_rpc_user=user
 TESTNET_core_rpc_password=password
 TESTNET_insight_api_url=https://insight.testnet.networks.dash.org:3002/insight-api
+TESTNET_show_in_ui=true
 # core_zmq_endpoint is optional and can be omitted
 ```
 

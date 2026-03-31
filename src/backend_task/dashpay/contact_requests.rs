@@ -37,6 +37,48 @@ fn is_transient_platform_sync_error(err: &str) -> bool {
         || err.contains("try another server")
 }
 
+/// Retries an async operation up to `MAX_RETRIES` times on transient platform sync errors.
+///
+/// `description` is used in warning log messages (e.g., `"DPNS query for 'alice'"`).
+/// `error_context` is used in the final error message if the error is not transient
+/// (e.g., `"query DPNS"`).
+async fn retry_on_transient<T, E, Fut, F>(
+    description: &str,
+    error_context: &str,
+    mut operation: F,
+) -> Result<T, String>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    const MAX_RETRIES: u32 = 3;
+    let mut retries = 0u32;
+    loop {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                let err = e.to_string();
+                if is_transient_platform_sync_error(&err) && retries < MAX_RETRIES {
+                    retries += 1;
+                    tracing::warn!(
+                        "Retrying {} (attempt {}/{}): {}",
+                        description,
+                        retries,
+                        MAX_RETRIES,
+                        e
+                    );
+                    continue;
+                }
+                if is_transient_platform_sync_error(&err) {
+                    return Err("Platform servers are temporarily out of sync. Please try again in a moment.".to_string());
+                }
+                return Err(format!("Failed to {}: {}", error_context, e));
+            }
+        }
+    }
+}
+
 pub async fn load_contact_requests(
     app_context: &Arc<AppContext>,
     sdk: &Sdk,
@@ -202,34 +244,18 @@ pub async fn send_contact_request_with_proof(
             Ok(to_id) => {
                 // Successfully parsed as ID, fetch the identity with retry
                 // logic for transient platform errors.
-                const MAX_RETRIES: u32 = 3;
-                let mut retries = 0u32;
-                loop {
-                    match Identity::fetch(sdk, to_id).await {
-                        Ok(Some(identity)) => break identity,
-                        Ok(None) => {
-                            return Err(format!("Identity {} not found", to_username_or_id));
+                retry_on_transient(
+                    &format!("identity fetch for '{}'", to_username_or_id),
+                    "fetch identity",
+                    || async {
+                        match Identity::fetch(sdk, to_id).await {
+                            Ok(Some(identity)) => Ok(identity),
+                            Ok(None) => Err(format!("Identity {} not found", to_username_or_id)),
+                            Err(e) => Err(e.to_string()),
                         }
-                        Err(e) => {
-                            let err = e.to_string();
-                            if is_transient_platform_sync_error(&err) && retries < MAX_RETRIES {
-                                retries += 1;
-                                tracing::warn!(
-                                    "Retrying identity fetch for '{}' (attempt {}/{}): {}",
-                                    to_username_or_id,
-                                    retries,
-                                    MAX_RETRIES,
-                                    e
-                                );
-                                continue;
-                            }
-                            if is_transient_platform_sync_error(&err) {
-                                return Err("Platform servers are temporarily out of sync. Please try again in a moment.".to_string());
-                            }
-                            return Err(format!("Failed to fetch identity: {}", e));
-                        }
-                    }
-                }
+                    },
+                )
+                .await?
             }
             Err(_) => {
                 // Not a valid ID format, assume it's a username without .dash suffix
@@ -554,46 +580,30 @@ async fn resolve_username_to_identity(
 
     // Query DPNS for the username using the app context's cached contract.
     // Retry on transient "height is outdated" / "try another server" errors.
-    const MAX_RETRIES: u32 = 3;
     let dpns_contract = app_context.dpns_contract.clone();
 
-    let mut retries = 0u32;
-    let results = loop {
-        let query = DocumentQuery::new(dpns_contract.clone(), "domain")
-            .map_err(|e| format!("Failed to create DPNS query: {}", e))?
-            .with_where(WhereClause {
-                field: "normalizedParentDomainName".to_string(),
-                operator: WhereOperator::Equal,
-                value: Value::Text("dash".to_string()),
-            })
-            .with_where(WhereClause {
-                field: "normalizedLabel".to_string(),
-                operator: WhereOperator::Equal,
-                value: Value::Text(normalized_name.clone()),
-            });
-
-        match Document::fetch_many(sdk, query).await {
-            Ok(results) => break results,
-            Err(e) => {
-                let err = e.to_string();
-                if is_transient_platform_sync_error(&err) && retries < MAX_RETRIES {
-                    retries += 1;
-                    tracing::warn!(
-                        "Retrying DPNS query for '{}' (attempt {}/{}): {}",
-                        username,
-                        retries,
-                        MAX_RETRIES,
-                        e
-                    );
-                    continue;
-                }
-                if is_transient_platform_sync_error(&err) {
-                    return Err("Platform servers are temporarily out of sync. Please try again in a moment.".to_string());
-                }
-                return Err(format!("Failed to query DPNS: {}", e));
-            }
-        }
-    };
+    let results = retry_on_transient(
+        &format!("DPNS query for '{}'", username),
+        "query DPNS",
+        || async {
+            let query = DocumentQuery::new(dpns_contract.clone(), "domain")
+                .map_err(|e| e.to_string())?
+                .with_where(WhereClause {
+                    field: "normalizedParentDomainName".to_string(),
+                    operator: WhereOperator::Equal,
+                    value: Value::Text("dash".to_string()),
+                })
+                .with_where(WhereClause {
+                    field: "normalizedLabel".to_string(),
+                    operator: WhereOperator::Equal,
+                    value: Value::Text(normalized_name.clone()),
+                });
+            Document::fetch_many(sdk, query)
+                .await
+                .map_err(|e| e.to_string())
+        },
+    )
+    .await?;
 
     let (_, document) = results
         .into_iter()
@@ -629,34 +639,18 @@ async fn resolve_username_to_identity(
         })?;
 
     // Fetch the identity with retry logic for transient errors
-    let mut retries = 0u32;
-    loop {
-        match Identity::fetch(sdk, identity_id).await {
-            Ok(Some(identity)) => return Ok(identity),
-            Ok(None) => return Err(format!("Identity not found for username '{}'", username)),
-            Err(e) => {
-                let err = e.to_string();
-                if is_transient_platform_sync_error(&err) && retries < MAX_RETRIES {
-                    retries += 1;
-                    tracing::warn!(
-                        "Retrying identity fetch for '{}' (attempt {}/{}): {}",
-                        username,
-                        retries,
-                        MAX_RETRIES,
-                        e
-                    );
-                    continue;
-                }
-                if is_transient_platform_sync_error(&err) {
-                    return Err("Platform servers are temporarily out of sync. Please try again in a moment.".to_string());
-                }
-                return Err(format!(
-                    "Failed to fetch identity for '{}': {}",
-                    username, e
-                ));
+    retry_on_transient(
+        &format!("identity fetch for '{}'", username),
+        &format!("fetch identity for '{}'", username),
+        || async {
+            match Identity::fetch(sdk, identity_id).await {
+                Ok(Some(identity)) => Ok(identity),
+                Ok(None) => Err(format!("Identity not found for username '{}'", username)),
+                Err(e) => Err(e.to_string()),
             }
-        }
-    }
+        },
+    )
+    .await
 }
 
 pub async fn accept_contact_request(

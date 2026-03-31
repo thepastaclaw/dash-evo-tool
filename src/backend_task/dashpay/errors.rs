@@ -169,7 +169,7 @@ impl DashPayError {
                 )
             }
             DashPayError::InvalidUsername { .. } => {
-                "Invalid username format. Usernames must end with '.dash'.".to_string()
+                "Invalid username format. Enter a username (e.g. 'alice') or a fully qualified name ending with '.dash' (e.g. 'alice.dash').".to_string()
             }
             DashPayError::RateLimited { .. } => {
                 "Too many requests. Please wait a moment before trying again.".to_string()

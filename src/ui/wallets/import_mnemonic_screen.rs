@@ -133,7 +133,7 @@ impl ImportMnemonicScreen {
                 .unwrap_or(0);
             Some(format!("Key {}", existing_wallet_count + 1))
         } else {
-            Some(self.alias_input.clone())
+            Some(self.alias_input.trim().to_string())
         };
 
         // Try WIF first, then hex
@@ -214,7 +214,7 @@ impl ImportMnemonicScreen {
                     .unwrap_or(0);
                 format!("Wallet {}", existing_wallet_count + 1)
             } else {
-                self.alias_input.clone()
+                self.alias_input.trim().to_string()
             };
 
             let wallet = Wallet {
@@ -630,7 +630,7 @@ impl ScreenLike for ImportMnemonicScreen {
 
                     ui.horizontal(|ui| {
                         ui.label("Name:");
-                        ui.text_edit_singleline(&mut self.alias_input);
+                        ui.add(egui::TextEdit::singleline(&mut self.alias_input).char_limit(64));
                     });
 
                     step += 1;

@@ -432,6 +432,59 @@ impl AppContext {
         &self.connection_status
     }
 
+    /// Wait until the [`ConnectionStatus`] reports
+    /// [`OverallConnectionState::Synced`], polling at
+    /// [`SPV_WAIT_POLL_INTERVAL`] and giving up after `timeout`.
+    ///
+    /// Each poll calls `connection_status.trigger_refresh(self)` so the
+    /// state is re-evaluated even when no UI frame loop is running (headless
+    /// MCP/CLI, backend-only test contexts).
+    ///
+    /// Used as a gate before invoking any DAPI/SDK proof-verifying backend
+    /// task — a fresh tempdir SPV instance must finish its initial header /
+    /// masternode-list / filter / block sync before quorum public keys are
+    /// available. Without this gate the SDK would issue queries that
+    /// downstream fail with opaque "quorum not found" or proof-verification
+    /// errors that are confusing to end users.
+    ///
+    /// Returns:
+    /// - `Ok(())` when the overall state reaches `Synced`.
+    /// - `Err(TaskError::SpvNotReady { timed_out: false })` when the
+    ///   subsystem is in an `Error` state (e.g. SPV reported a fatal error).
+    /// - `Err(TaskError::SpvNotReady { timed_out: true })` when `timeout`
+    ///   elapses without ever reaching `Synced`.
+    pub async fn await_spv_ready(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<(), crate::backend_task::error::TaskError> {
+        use crate::backend_task::error::TaskError;
+        use connection_status::{OverallConnectionState, SPV_WAIT_POLL_INTERVAL};
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // Drives the throttled refresh that recomputes overall_state from
+            // the per-subsystem atomics. Result is intentionally ignored —
+            // the subsequent `overall_state()` read is the source of truth.
+            let _ = self.connection_status.trigger_refresh(self);
+            let state = self.connection_status.overall_state();
+            match state {
+                OverallConnectionState::Synced => return Ok(()),
+                OverallConnectionState::Error => {
+                    return Err(TaskError::SpvNotReady { timed_out: false });
+                }
+                _ => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "SPV readiness wait timed out after {} seconds (state: {state:?})",
+                    timeout.as_secs()
+                );
+                return Err(TaskError::SpvNotReady { timed_out: true });
+            }
+            tokio::time::sleep(SPV_WAIT_POLL_INTERVAL).await;
+        }
+    }
+
     pub fn egui_ctx(&self) -> &egui::Context {
         &self.egui_ctx
     }

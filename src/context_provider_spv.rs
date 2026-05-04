@@ -102,9 +102,16 @@ impl ContextProvider for SpvProvider {
 
         let spv_manager = app_ctx.spv_manager();
 
+        // SPV-based lookups fail when the requested quorum is not yet
+        // present in the synced masternode list / rotated-quorum cache —
+        // typically because SPV has not finished its initial sync. The
+        // `InvalidQuorum` variant is the closest semantic fit (the SDK
+        // asked for a quorum we cannot resolve), and it lets callers and
+        // logs distinguish quorum-resolution failures from generic
+        // context-provider errors.
         spv_manager
             .get_quorum_public_key(quorum_type, quorum_hash, core_chain_locked_height)
-            .map_err(ContextProviderError::Generic)
+            .map_err(ContextProviderError::InvalidQuorum)
     }
 
     fn get_platform_activation_height(

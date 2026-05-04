@@ -16,6 +16,16 @@ const REFRESH_DISCONNECTED: Duration = Duration::from_secs(1);
 
 const SPV_PEER_DEGRADED_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Poll cadence for waiting on SPV to reach `Synced` — matches the
+/// `ConnectionStatus` throttle so each poll triggers at most one refresh.
+pub const SPV_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Default timeout for awaiting SPV readiness.
+///
+/// Initial SPV sync (headers, masternode list, filter headers, filters,
+/// blocks) can take several minutes on a fresh tempdir state.
+pub const SPV_WAIT_DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Five-state connection indicator matching the UI's colored circle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

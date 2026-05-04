@@ -1,7 +1,7 @@
 //! Parameter resolution helpers for MCP tools.
 
 use crate::context::AppContext;
-use crate::context::connection_status::OverallConnectionState;
+use crate::context::connection_status::SPV_WAIT_DEFAULT_TIMEOUT;
 use crate::mcp::error::McpToolError;
 use crate::mcp::server::network_display_name;
 use crate::model::qualified_identity::QualifiedIdentity;
@@ -9,11 +9,6 @@ use crate::model::wallet::WalletSeedHash;
 use dash_sdk::dpp::platform_value::string_encoding::Encoding;
 use dash_sdk::dpp::prelude::Identifier;
 use std::sync::{Arc, RwLock};
-
-/// Poll interval for waiting on SPV connection -- matches ConnectionStatus throttle.
-const SPV_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-/// Initial SPV sync (headers, masternodes, filters, blocks) can take several minutes.
-const SPV_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Verify that the expected network matches the server's active network.
 ///
@@ -114,25 +109,23 @@ pub(crate) fn wallet_arc(
 ///
 /// Only tools that make no network calls (e.g. `core_wallets_list`,
 /// `network_info`, `tool_describe`) skip this gate.
+///
+/// Delegates to [`AppContext::await_spv_ready`] (the shared helper used by GUI
+/// backend-task dispatch) and remaps the typed
+/// [`TaskError::SpvNotReady`](crate::backend_task::error::TaskError::SpvNotReady)
+/// outcomes to [`McpToolError::SpvSyncFailed`] to preserve the MCP wire
+/// contract (error code, JSON-RPC message).
 pub(crate) async fn ensure_spv_synced(ctx: &AppContext) -> Result<(), McpToolError> {
-    let deadline = tokio::time::Instant::now() + SPV_WAIT_TIMEOUT;
-    loop {
-        let _ = ctx.connection_status.trigger_refresh(ctx);
-        let state = ctx.connection_status.overall_state();
-        if state == OverallConnectionState::Synced {
-            return Ok(());
-        }
-        if state == OverallConnectionState::Error {
-            return Err(McpToolError::SpvSyncFailed);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            tracing::warn!(
-                "SPV sync timed out after {} seconds (state: {state:?})",
-                SPV_WAIT_TIMEOUT.as_secs()
-            );
-            return Err(McpToolError::SpvSyncFailed);
-        }
-        tokio::time::sleep(SPV_WAIT_POLL_INTERVAL).await;
+    use crate::backend_task::error::TaskError;
+    match ctx.await_spv_ready(SPV_WAIT_DEFAULT_TIMEOUT).await {
+        Ok(()) => Ok(()),
+        Err(TaskError::SpvNotReady { .. }) => Err(McpToolError::SpvSyncFailed),
+        // `await_spv_ready` only ever returns `SpvNotReady` today; fail loud
+        // if a future change introduces a new error variant so the MCP layer
+        // can decide how to map it instead of swallowing it silently.
+        Err(other) => Err(McpToolError::Internal(format!(
+            "Unexpected error while awaiting SPV readiness: {other}"
+        ))),
     }
 }
 

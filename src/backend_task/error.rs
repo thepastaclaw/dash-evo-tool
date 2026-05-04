@@ -28,6 +28,21 @@ pub enum TaskError {
     #[error("{}", spv_user_message(.0))]
     Spv(#[from] crate::spv::SpvError),
 
+    /// SPV background sync has not reached the `Synced` state, so DAPI proof
+    /// verification (which depends on quorum and masternode-list data from
+    /// the synced chain) cannot yet be performed.
+    ///
+    /// Surfaced before invoking any DAPI/SDK-using backend task so the user
+    /// gets a clear, actionable message instead of a downstream
+    /// quorum-not-found / proof-verification failure deep in the SDK.
+    #[error("Background sync is catching up. Try again in a moment.")]
+    SpvNotReady {
+        /// `true` when we hit the wait deadline, `false` if SPV reported an
+        /// error state. Display text is identical for both cases — the field
+        /// is internal-only and surfaces in `Debug` for logs.
+        timed_out: bool,
+    },
+
     /// DashPay domain errors.
     #[error(transparent)]
     DashPay(#[from] crate::backend_task::dashpay::errors::DashPayError),
@@ -1618,6 +1633,20 @@ mod tests {
     use dash_sdk::dpp::consensus::state::identity::identity_public_key_already_exists_for_unique_contract_bounds_error::IdentityPublicKeyAlreadyExistsForUniqueContractBoundsError;
     use dash_sdk::dpp::identity::Purpose;
     use dash_sdk::platform::Identifier;
+
+    #[test]
+    fn spv_not_ready_display_is_user_friendly() {
+        // Both internal cases (timeout vs subsystem error) must surface the
+        // same calm, actionable message to the user. Internal distinction is
+        // preserved in `Debug` for logs only.
+        let timeout = TaskError::SpvNotReady { timed_out: true }.to_string();
+        let errored = TaskError::SpvNotReady { timed_out: false }.to_string();
+        assert_eq!(timeout, errored);
+        assert_eq!(
+            timeout,
+            "Background sync is catching up. Try again in a moment."
+        );
+    }
 
     #[test]
     fn rpc_http_401_converts_to_core_rpc_auth_failed() {

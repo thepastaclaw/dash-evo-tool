@@ -370,6 +370,99 @@ pub enum BackendTaskSuccessResult {
 
 impl BackendTaskSuccessResult {}
 
+impl BackendTask {
+    /// Whether this task issues DAPI/SDK calls that perform proof verification
+    /// against quorum & masternode-list data sourced from SPV. If `true`,
+    /// dispatch must wait for SPV to reach `Synced` before running the task,
+    /// otherwise the SDK will fail deep inside proof verification with an
+    /// opaque error.
+    ///
+    /// Audit (must be kept in sync with `run_backend_task`):
+    ///
+    /// - Gated (DAPI/SDK proof-verifying):
+    ///   - `ContractTask`, `ContestedResourceTask`, `IdentityTask`,
+    ///     `DocumentTask`, `DashPayTask`, `BroadcastStateTransition`,
+    ///     `TokenTask`, `PlatformInfo`, `GroveSTARKTask` — all variants are
+    ///     Platform queries / broadcasts.
+    ///   - `WalletTask` — all variants except `GenerateReceiveAddress` touch
+    ///     Platform addresses (balances, transfers, withdrawals,
+    ///     funding-from-asset-lock, funding-from-utxos).
+    ///   - `ShieldedTask` — all variants except `WarmUpProvingKey` interact
+    ///     with the Platform shielded pool (sync, shield, transfer,
+    ///     unshield, nullifier checks, withdrawal).
+    ///
+    /// - Not gated (local / Core-only / discovery / system):
+    ///   - `CoreTask` — uses Core RPC or SPV directly, never DAPI. (The
+    ///     `RefreshWalletInfo(_, sync_platform=true)` path internally calls
+    ///     `fetch_platform_address_balances`, but that already surfaces a
+    ///     soft "Platform sync failed" warning rather than a hard error,
+    ///     which is the historical behaviour.)
+    ///   - `MnListTask` — uses Core P2P directly, no DAPI.
+    ///   - `SystemTask` — local DB / preferences only.
+    ///   - `ReinitCoreClientAndSdk`, `SwitchNetwork`, `DiscoverDapiNodes`,
+    ///     `None` — bootstrap / discovery; gating these would deadlock the
+    ///     very subsystems the gate depends on.
+    pub fn requires_spv_ready_for_dapi(&self) -> bool {
+        match self {
+            BackendTask::ContractTask(_)
+            | BackendTask::ContestedResourceTask(_)
+            | BackendTask::IdentityTask(_)
+            | BackendTask::DocumentTask(_)
+            | BackendTask::DashPayTask(_)
+            | BackendTask::BroadcastStateTransition(_)
+            | BackendTask::TokenTask(_)
+            | BackendTask::PlatformInfo(_)
+            | BackendTask::GroveSTARKTask(_) => true,
+
+            BackendTask::WalletTask(t) => t.requires_spv_ready_for_dapi(),
+            BackendTask::ShieldedTask(t) => t.requires_spv_ready_for_dapi(),
+
+            BackendTask::CoreTask(_)
+            | BackendTask::MnListTask(_)
+            | BackendTask::SystemTask(_)
+            | BackendTask::ReinitCoreClientAndSdk
+            | BackendTask::SwitchNetwork { .. }
+            | BackendTask::DiscoverDapiNodes { .. }
+            | BackendTask::None => false,
+        }
+    }
+}
+
+impl WalletTask {
+    /// See [`BackendTask::requires_spv_ready_for_dapi`]. Only
+    /// `GenerateReceiveAddress` is purely local; every other variant queries
+    /// or mutates Platform address state via the SDK.
+    pub fn requires_spv_ready_for_dapi(&self) -> bool {
+        match self {
+            WalletTask::GenerateReceiveAddress { .. } => false,
+            WalletTask::FetchPlatformAddressBalances { .. }
+            | WalletTask::TransferPlatformCredits { .. }
+            | WalletTask::FundPlatformAddressFromAssetLock { .. }
+            | WalletTask::WithdrawFromPlatformAddress { .. }
+            | WalletTask::FundPlatformAddressFromWalletUtxos { .. } => true,
+        }
+    }
+}
+
+impl ShieldedTask {
+    /// See [`BackendTask::requires_spv_ready_for_dapi`]. `WarmUpProvingKey`
+    /// is a CPU-only Orchard proving-key precomputation with no network
+    /// calls. Every other variant interacts with the Platform shielded pool.
+    pub fn requires_spv_ready_for_dapi(&self) -> bool {
+        match self {
+            ShieldedTask::WarmUpProvingKey => false,
+            ShieldedTask::InitializeShieldedWallet { .. }
+            | ShieldedTask::SyncNotes { .. }
+            | ShieldedTask::ShieldCredits { .. }
+            | ShieldedTask::ShieldedTransfer { .. }
+            | ShieldedTask::UnshieldCredits { .. }
+            | ShieldedTask::CheckNullifiers { .. }
+            | ShieldedTask::ShieldFromAssetLock { .. }
+            | ShieldedTask::ShieldedWithdrawal { .. } => true,
+        }
+    }
+}
+
 impl AppContext {
     /// Run backend tasks sequentially
     pub async fn run_backend_tasks_sequential(
@@ -411,6 +504,16 @@ impl AppContext {
         task: BackendTask,
         sender: SenderAsync<TaskResult>,
     ) -> Result<BackendTaskSuccessResult, TaskError> {
+        // Block DAPI/SDK proof-verifying tasks until SPV has finished its
+        // initial sync. Without this gate the SDK's quorum cache is empty
+        // and any proof verification fails with a confusing
+        // "quorum public key not found" error. See
+        // [`BackendTask::requires_spv_ready_for_dapi`] for the audited list
+        // of gated vs. non-gated families.
+        if task.requires_spv_ready_for_dapi() {
+            self.await_spv_ready(crate::context::connection_status::SPV_WAIT_DEFAULT_TIMEOUT)
+                .await?;
+        }
         let sdk = self.sdk.load().as_ref().clone();
         match task {
             BackendTask::ContractTask(contract_task) => {
@@ -591,5 +694,96 @@ impl AppContext {
                 .await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gating_tests {
+    //! Tests that pin down which `BackendTask` families must wait for SPV to
+    //! reach `Synced` before invoking the SDK.
+    //!
+    //! These are deliberately exhaustive (sub-task helpers use `match` with
+    //! every variant explicit) so that adding a new task variant becomes a
+    //! compile error until the author has consciously decided whether the
+    //! variant calls into DAPI/SDK proof verification or not. The intent is
+    //! to keep the gate honest as the codebase grows.
+    use super::*;
+
+    #[test]
+    fn local_only_tasks_are_not_gated() {
+        assert!(!BackendTask::None.requires_spv_ready_for_dapi());
+        assert!(!BackendTask::ReinitCoreClientAndSdk.requires_spv_ready_for_dapi());
+        assert!(
+            !BackendTask::SwitchNetwork {
+                network: Network::Testnet,
+                start_spv: false,
+            }
+            .requires_spv_ready_for_dapi()
+        );
+        assert!(
+            !BackendTask::DiscoverDapiNodes {
+                network: Network::Testnet,
+            }
+            .requires_spv_ready_for_dapi()
+        );
+        assert!(
+            !BackendTask::SystemTask(SystemTask::WipePlatformData).requires_spv_ready_for_dapi()
+        );
+        assert!(
+            !BackendTask::MnListTask(mnlist::MnListTask::FetchChainLocks {
+                base_block_height: 0,
+                block_height: 0,
+            })
+            .requires_spv_ready_for_dapi()
+        );
+    }
+
+    #[test]
+    fn wallet_task_local_variant_is_not_gated() {
+        let t = WalletTask::GenerateReceiveAddress {
+            seed_hash: [0u8; 32],
+        };
+        assert!(!t.requires_spv_ready_for_dapi());
+        assert!(!BackendTask::WalletTask(t).requires_spv_ready_for_dapi());
+    }
+
+    #[test]
+    fn wallet_task_platform_variants_are_gated() {
+        let t = WalletTask::FetchPlatformAddressBalances {
+            seed_hash: [0u8; 32],
+        };
+        assert!(t.requires_spv_ready_for_dapi());
+        assert!(BackendTask::WalletTask(t).requires_spv_ready_for_dapi());
+    }
+
+    #[test]
+    fn shielded_warmup_is_not_gated() {
+        let t = ShieldedTask::WarmUpProvingKey;
+        assert!(!t.requires_spv_ready_for_dapi());
+        assert!(!BackendTask::ShieldedTask(t).requires_spv_ready_for_dapi());
+    }
+
+    #[test]
+    fn shielded_platform_variants_are_gated() {
+        let t = ShieldedTask::SyncNotes {
+            seed_hash: [0u8; 32],
+        };
+        assert!(t.requires_spv_ready_for_dapi());
+        assert!(BackendTask::ShieldedTask(t).requires_spv_ready_for_dapi());
+
+        let t = ShieldedTask::CheckNullifiers {
+            seed_hash: [0u8; 32],
+        };
+        assert!(t.requires_spv_ready_for_dapi());
+        assert!(BackendTask::ShieldedTask(t).requires_spv_ready_for_dapi());
+    }
+
+    #[test]
+    fn identity_task_refresh_is_gated() {
+        // Pick the simplest-to-construct IdentityTask variant; the helper is
+        // family-level (any IdentityTask is gated) so this is sufficient to
+        // pin the IdentityTask arm in the classifier.
+        let t = BackendTask::IdentityTask(IdentityTask::RefreshLoadedIdentitiesOwnedDPNSNames);
+        assert!(t.requires_spv_ready_for_dapi());
     }
 }

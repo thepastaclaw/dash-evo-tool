@@ -48,6 +48,11 @@ fn get_min_token_price(pricing_schedule: &TokenPricingSchedule) -> u64 {
     }
 }
 
+fn add_token_close_button(ui: &mut Ui) -> egui::Response {
+    let dark_mode = ui.ctx().style().visuals.dark_mode;
+    ComponentStyles::add_secondary_button(ui, "Close", dark_mode)
+}
+
 impl TokensScreen {
     fn render_token_info_popup_content(&self, ui: &mut Ui, token_info: &TokenInfoWithDataContract) {
         let config = &token_info.token_configuration;
@@ -195,15 +200,10 @@ impl TokensScreen {
                                     self.render_token_info_popup_content(ui, &token_info);
 
                                     ui.separator();
-                                    let dark_mode = ui.ctx().style().visuals.dark_mode;
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if ComponentStyles::add_secondary_button(
-                                                ui, "Close", dark_mode,
-                                            )
-                                            .clicked()
-                                            {
+                                            if add_token_close_button(ui).clicked() {
                                                 close_popup = true;
                                             }
                                         },
@@ -268,30 +268,14 @@ impl TokensScreen {
 
                     match self.tokens_subscreen {
                         TokensSubscreen::MyTokens => {
-                            let button = egui::Button::new(
-                                RichText::new("Import Token")
-                                    .color(egui::Color32::WHITE)
-                                    .strong(),
-                            )
-                            .fill(DashColors::DASH_BLUE)
-                            .min_size(egui::vec2(150.0, 36.0));
-
-                            if ui.add(button).clicked() {
+                            if ComponentStyles::add_primary_button(ui, "Import Token").clicked() {
                                 app_action = AppAction::AddScreen(
                                     ScreenType::AddTokenById.create_screen(&self.app_context),
                                 );
                             }
                         }
                         TokensSubscreen::SearchTokens | TokensSubscreen::TokenCreator => {
-                            let button = egui::Button::new(
-                                RichText::new("Refresh")
-                                    .color(egui::Color32::WHITE)
-                                    .strong(),
-                            )
-                            .fill(DashColors::DASH_BLUE)
-                            .min_size(egui::vec2(150.0, 36.0));
-
-                            if ui.add(button).clicked() {
+                            if ComponentStyles::add_primary_button(ui, "Refresh").clicked() {
                                 if let RefreshingStatus::Refreshing = self.refreshing_status {
                                     app_action = AppAction::None;
                                 } else {
@@ -623,13 +607,10 @@ impl TokensScreen {
                             }
 
                             ui.separator();
-                            let dark_mode = ui.ctx().style().visuals.dark_mode;
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ComponentStyles::add_secondary_button(ui, "Close", dark_mode)
-                                        .clicked()
-                                    {
+                                    if add_token_close_button(ui).clicked() {
                                         self.show_explanation_popup = None;
                                     }
                                 },
@@ -673,7 +654,6 @@ impl TokensScreen {
         let mut pos = 0;
         let mut action = AppAction::None;
         ui.spacing_mut().item_spacing.x = 5.0;
-        let dark_mode = ui.ctx().style().visuals.dark_mode;
 
         if range.contains(&pos) {
             if itb.available_actions.can_transfer {
@@ -689,14 +669,8 @@ impl TokensScreen {
                     }
                 }
             } else {
-                // Disabled, grayed-out Transfer button
-                ui.add_enabled(
-                    false,
-                    egui::Button::new(
-                        RichText::new("Transfer").color(DashColors::muted_color(dark_mode)),
-                    ),
-                )
-                .disabled_tooltip("Transfer not available");
+                ComponentStyles::add_primary_button_enabled(ui, false, "Transfer")
+                    .disabled_tooltip("Transfer not available");
             }
         }
 
@@ -954,11 +928,7 @@ impl TokensScreen {
                             ui.close_kind(egui::UiKind::Menu);
                         }
                     } else {
-                        // Disabled, grayed-out Purchase button
-                        ui.add_enabled(
-                                false,
-                                egui::Button::new(RichText::new("Purchase").color(DashColors::muted_color(dark_mode))),
-                            )
+                        ComponentStyles::add_primary_button_enabled(ui, false, "Purchase")
                             .disabled_tooltip({
                                 if let Some(Some(pricing)) = self.token_pricing_data.get(&itb.token_id) {
                                     let min_price = get_min_token_price(pricing);

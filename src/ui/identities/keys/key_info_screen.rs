@@ -1,4 +1,9 @@
 use crate::app::AppAction;
+use crate::backend_task::identity::IdentityTask;
+use crate::backend_task::identity::disable_identity_keys::{
+    purpose_label, security_level_label, validate_keys_can_be_disabled,
+};
+use crate::backend_task::{BackendTask, BackendTaskSuccessResult};
 use crate::context::AppContext;
 use crate::model::qualified_identity::QualifiedIdentity;
 use crate::model::qualified_identity::encrypted_key_storage::{
@@ -6,7 +11,6 @@ use crate::model::qualified_identity::encrypted_key_storage::{
 };
 use crate::model::secret::Secret;
 use crate::model::wallet::Wallet;
-use crate::ui::components::MessageBanner;
 use crate::ui::components::component_trait::Component;
 use crate::ui::components::info_popup::InfoPopup;
 use crate::ui::components::left_panel::add_left_panel;
@@ -16,7 +20,8 @@ use crate::ui::components::top_panel::add_top_panel;
 use crate::ui::components::wallet_unlock_popup::{
     WalletUnlockPopup, WalletUnlockResult, try_open_wallet_no_password, wallet_needs_unlock,
 };
-use crate::ui::theme::DashColors;
+use crate::ui::components::{BannerHandle, MessageBanner, OptionBannerExt};
+use crate::ui::theme::{DashColors, ResponseExt};
 use crate::ui::{MessageType, ScreenLike};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -28,6 +33,7 @@ use dash_sdk::dpp::dashcore::sign_message::signed_msg_hash;
 use dash_sdk::dpp::dashcore::{Address, PrivateKey, PubkeyHash, ScriptHash};
 use dash_sdk::dpp::identity::KeyType;
 use dash_sdk::dpp::identity::KeyType::BIP13_SCRIPT_HASH;
+use dash_sdk::dpp::identity::accessors::IdentityGettersV0;
 use dash_sdk::dpp::identity::hash::IdentityPublicKeyHashMethodsV0;
 use dash_sdk::dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
 use dash_sdk::dpp::identity::identity_public_key::contract_bounds::ContractBounds;
@@ -54,6 +60,9 @@ pub struct KeyInfoScreen {
     view_private_key_even_if_encrypted_or_in_wallet: bool,
     show_pop_up_info: Option<String>,
     remove_private_key_dialog: Option<ConfirmationDialog>,
+    disable_key_dialog: Option<ConfirmationDialog>,
+    disable_in_progress: bool,
+    disable_banner: Option<BannerHandle>,
 }
 
 // /// The prefix for signed messages using Dash's message signing protocol.
@@ -70,6 +79,45 @@ pub struct KeyInfoScreen {
 
 impl ScreenLike for KeyInfoScreen {
     fn refresh(&mut self) {}
+
+    fn display_message(&mut self, _message: &str, message_type: MessageType) {
+        // Errors and warnings while a disable is in flight end that operation; clear
+        // our progress banner so AppState's result banner is the only one shown. Gated
+        // on `disable_in_progress` so unrelated banners do not toggle our state.
+        if self.disable_in_progress
+            && matches!(message_type, MessageType::Error | MessageType::Warning)
+        {
+            self.disable_banner.take_and_clear();
+            self.disable_in_progress = false;
+        }
+    }
+
+    fn display_task_result(&mut self, result: BackendTaskSuccessResult) {
+        if let BackendTaskSuccessResult::DisabledIdentityKeys {
+            identity,
+            disabled_key_ids,
+            ..
+        } = result
+        {
+            self.disable_banner.take_and_clear();
+            self.disable_in_progress = false;
+            // Refresh local key state from the proof-verified identity if it matches the
+            // identity we are viewing.
+            if identity.identity.id() == self.identity.identity.id() {
+                if disabled_key_ids.contains(&self.key.id())
+                    && let Some(updated) = identity.identity.public_keys().get(&self.key.id())
+                {
+                    self.key = updated.clone();
+                }
+                self.identity = identity;
+            }
+            MessageBanner::set_global(
+                self.app_context.egui_ctx(),
+                "Key disabled.",
+                MessageType::Success,
+            );
+        }
+    }
 
     fn ui(&mut self, ctx: &Context) -> AppAction {
         let mut action = add_top_panel(
@@ -89,7 +137,7 @@ impl ScreenLike for KeyInfoScreen {
         );
 
         action |= island_central_panel(ctx, |ui| {
-            let inner_action = AppAction::None;
+            let mut inner_action = AppAction::None;
 
             ScrollArea::vertical().show(ui, |ui| {
                 let text_primary = DashColors::text_primary(ui.ctx().style().visuals.dark_mode);
@@ -204,6 +252,11 @@ impl ScreenLike for KeyInfoScreen {
 
                         ui.end_row();
                     });
+
+                ui.add_space(10.0);
+
+                // Disable Key control — only meaningful for non-master, currently-enabled keys.
+                inner_action |= self.render_disable_key_section(ui);
 
                 ui.add_space(10.0);
                 ui.separator();
@@ -557,6 +610,9 @@ impl ScreenLike for KeyInfoScreen {
                     self.show_remove_private_key_dialog(ui);
                 }
 
+                // Show the disable key confirmation popup
+                inner_action |= self.show_disable_key_dialog(ui);
+
                 ui.add_space(10.0);
             });
 
@@ -626,6 +682,9 @@ impl KeyInfoScreen {
             view_private_key_even_if_encrypted_or_in_wallet: false,
             show_pop_up_info: None,
             remove_private_key_dialog: None,
+            disable_key_dialog: None,
+            disable_in_progress: false,
+            disable_banner: None,
         }
     }
 
@@ -823,5 +882,110 @@ impl KeyInfoScreen {
                 }
             }
         }
+    }
+
+    /// Render the "Disable Key" control. Returns an action if a backend task was dispatched
+    /// (always `None` here — dispatch happens via the confirmation dialog).
+    fn render_disable_key_section(&mut self, ui: &mut egui::Ui) -> AppAction {
+        // Already disabled — surface state, no control.
+        if self.key.is_disabled() {
+            return AppAction::None;
+        }
+
+        // Master keys are read-only on Platform; never offer disable.
+        if self.key.security_level() == dash_sdk::dpp::identity::SecurityLevel::MASTER {
+            return AppAction::None;
+        }
+
+        // Pre-flight validation against the local identity to decide whether to enable
+        // the button. The backend re-runs this check against fresh Platform state.
+        let blocking_reason =
+            validate_keys_can_be_disabled(&self.identity.identity, &[self.key.id()])
+                .err()
+                .map(|e| e.to_string());
+
+        // Dispatching the disable also requires the master signing key.
+        let has_master = self.identity.can_sign_with_master_key().is_some();
+
+        let button_enabled = blocking_reason.is_none() && has_master && !self.disable_in_progress;
+
+        let button_text = if self.disable_in_progress {
+            "Disabling…"
+        } else {
+            "Disable Key"
+        };
+        let response = ui.add_enabled(
+            button_enabled,
+            crate::ui::theme::ComponentStyles::danger_button(button_text),
+        );
+
+        let tooltip = if let Some(reason) = blocking_reason {
+            reason
+        } else if !has_master {
+            "Disabling a key requires the master key for this identity, which is not loaded."
+                .to_string()
+        } else if self.disable_in_progress {
+            "Waiting for the network to confirm the previous disable.".to_string()
+        } else {
+            "Disable this key on Platform. The key will no longer be usable for signing."
+                .to_string()
+        };
+
+        let clicked = response.clicked();
+        if button_enabled {
+            response.clickable_tooltip(tooltip);
+        } else {
+            response.info_tooltip(tooltip);
+        }
+
+        if clicked {
+            let key_id = self.key.id();
+            let purpose = purpose_label(self.key.purpose());
+            let security_level = security_level_label(self.key.security_level());
+            self.disable_key_dialog = Some(
+                ConfirmationDialog::new(
+                    "Disable identity key",
+                    format!(
+                        "Disable key {key_id} ({purpose} / {security_level}) on this identity? The key will no longer be usable for signing on Platform."
+                    ),
+                )
+                .confirm_text(Some("Disable"))
+                .cancel_text(Some("Cancel"))
+                .danger_mode(true),
+            );
+        }
+
+        AppAction::None
+    }
+
+    /// Show the disable-key confirmation dialog and dispatch the backend task on confirm.
+    fn show_disable_key_dialog(&mut self, ui: &mut egui::Ui) -> AppAction {
+        let Some(dialog) = self.disable_key_dialog.as_mut() else {
+            return AppAction::None;
+        };
+        let response = dialog.show(ui);
+        let Some(result) = response.inner.dialog_response else {
+            return AppAction::None;
+        };
+        self.disable_key_dialog = None;
+        if result != ConfirmationStatus::Confirmed {
+            return AppAction::None;
+        }
+
+        // Last-chance local validation. The backend repeats this check against fresh
+        // Platform state.
+        if let Err(e) = validate_keys_can_be_disabled(&self.identity.identity, &[self.key.id()]) {
+            MessageBanner::set_global(ui.ctx(), e.to_string(), MessageType::Error).with_details(&e);
+            return AppAction::None;
+        }
+
+        self.disable_in_progress = true;
+        let handle = MessageBanner::set_global(ui.ctx(), "Disabling key…", MessageType::Info);
+        handle.with_elapsed();
+        self.disable_banner = Some(handle);
+
+        AppAction::BackendTask(BackendTask::IdentityTask(
+            IdentityTask::DisableIdentityKeys(self.identity.clone(), vec![self.key.id()]),
+        ))
     }
 }

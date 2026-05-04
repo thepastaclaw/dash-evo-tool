@@ -262,6 +262,14 @@ pub enum BackendTaskSuccessResult {
 
     // Identity operation results (replacing string messages)
     AddedKeyToIdentity(FeeResult),
+    /// One or more identity public keys were disabled. The updated identity
+    /// (with refreshed `disabled_at` timestamps on the affected keys) is included
+    /// so screens can refresh without a separate fetch.
+    DisabledIdentityKeys {
+        identity: QualifiedIdentity,
+        disabled_key_ids: Vec<dash_sdk::dpp::identity::KeyID>,
+        fee_result: FeeResult,
+    },
     TransferredCredits(FeeResult),
     WithdrewFromIdentity(FeeResult),
     RegisteredDpnsName(FeeResult),

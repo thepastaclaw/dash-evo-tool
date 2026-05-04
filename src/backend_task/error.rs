@@ -15,6 +15,7 @@ use dash_sdk::dpp::consensus::basic::basic_error::BasicError;
 use dash_sdk::dpp::consensus::state::state_error::StateError;
 use dash_sdk::dpp::dashcore;
 use dash_sdk::dpp::dashcore::Network;
+use dash_sdk::dpp::identity::KeyID;
 use dash_sdk::dpp::platform_value::string_encoding::Encoding;
 use thiserror::Error;
 
@@ -197,6 +198,13 @@ pub enum TaskError {
         "This identity could not be found in your local wallet. Try refreshing your identities list."
     )]
     IdentityNotFoundLocally,
+
+    /// The identity could not be fetched from Platform — it may not exist (yet) or may
+    /// have been recently created and not yet propagated.
+    #[error(
+        "This identity could not be found on Platform. Refresh the identities list and try again."
+    )]
+    IdentityNotFoundOnPlatform,
 
     /// Failed to build the identity update state transition.
     #[error("Could not build the key update transaction. Please retry.")]
@@ -1028,6 +1036,39 @@ pub enum TaskError {
     /// Creating a network context failed during a network switch.
     #[error("Could not connect to {network}. Check your network configuration and retry.")]
     NetworkContextCreationFailed { network: Network, detail: String },
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Disable identity key errors
+    // ──────────────────────────────────────────────────────────────────────────
+    /// No keys were selected to disable.
+    #[error("Select at least one key to disable.")]
+    NoKeysToDisable,
+
+    /// The key was not found on the identity (it may have been removed since the screen loaded).
+    #[error(
+        "Key {key_id} could not be found on this identity. Refresh the identity and try again."
+    )]
+    KeyNotFoundOnIdentity { key_id: KeyID },
+
+    /// The key is already disabled — no need to disable it again.
+    #[error("Key {key_id} is already disabled.")]
+    KeyAlreadyDisabled { key_id: KeyID },
+
+    /// The master key is read-only on Platform and cannot be disabled.
+    #[error("Key {key_id} is the master key and cannot be disabled.")]
+    CannotDisableMasterKey { key_id: KeyID },
+
+    /// Disabling this key would leave the identity without an enabled key for the
+    /// same `(purpose, security level)` combination — the identity would lose its
+    /// only key for that role and could no longer act in that capacity.
+    #[error(
+        "Disabling key {key_id} would leave no enabled {purpose} key at the {security_level} security level. Add another key with the same purpose and level before disabling this one."
+    )]
+    WouldLeaveNoKeyAtPurposeLevel {
+        key_id: KeyID,
+        purpose: &'static str,
+        security_level: &'static str,
+    },
 }
 
 /// Escapes control characters in a token name for safe display in error messages.

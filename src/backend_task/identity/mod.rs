@@ -1,4 +1,5 @@
 mod add_key_to_identity;
+pub mod disable_identity_keys;
 mod discover_identities;
 mod load_identity;
 mod load_identity_by_dpns_name;
@@ -365,6 +366,11 @@ pub enum IdentityTask {
         wallet_seed_hash: WalletSeedHash,
     },
     AddKeyToIdentity(QualifiedIdentity, QualifiedIdentityPublicKey, [u8; 32]),
+    /// Disable one or more existing identity public keys via an Identity Update
+    /// state transition. The validator in `disable_identity_keys` enforces the
+    /// safety rules (no master key, no already-disabled keys, leaves at least
+    /// one enabled key for the same purpose and security level).
+    DisableIdentityKeys(QualifiedIdentity, Vec<KeyID>),
     WithdrawFromIdentity(QualifiedIdentity, Option<Address>, Credits, Option<KeyID>),
     Transfer(QualifiedIdentity, Identifier, Credits, Option<KeyID>),
     /// Transfer credits from identity to Platform addresses
@@ -704,6 +710,10 @@ impl AppContext {
             }
             IdentityTask::AddKeyToIdentity(qualified_identity, public_key_to_add, private_key) => {
                 self.add_key_to_identity(sdk, qualified_identity, public_key_to_add, private_key)
+                    .await
+            }
+            IdentityTask::DisableIdentityKeys(qualified_identity, key_ids) => {
+                self.disable_identity_keys(sdk, qualified_identity, key_ids)
                     .await
             }
             IdentityTask::RegisterIdentity(registration_info) => {

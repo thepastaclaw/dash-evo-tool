@@ -441,6 +441,17 @@ As a user, I want to view all keys associated with my identity so that I can aud
 - Lists all keys with type, purpose, and status.
 - View individual key details.
 
+### IDN-008b: Disable identity key [Implemented]
+**Persona:** Priya, Jordan
+
+As a user, I want to disable an existing identity public key so that I can revoke its ability to sign on Platform after rotating to a new key or losing access to the device that held the private key.
+
+- Disable control is available on the key info screen for non-master, currently-enabled keys.
+- A confirmation dialog is required before broadcasting.
+- The system blocks disabling the master key, an already-disabled key, or a key whose removal would leave no enabled key with the same purpose and security level.
+- An Identity Update state transition is built and broadcast using the master key as signer.
+- Success and failure are surfaced via the global message banner; the displayed key state refreshes from the proof result.
+
 ### IDN-009: Refresh identity state [Implemented]
 **Persona:** Priya, Jordan
 

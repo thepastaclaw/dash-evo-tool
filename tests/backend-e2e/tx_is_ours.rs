@@ -61,6 +61,7 @@ async fn test_spv_transactions_is_ours_flag() {
             address: b_address.clone(),
             amount_duffs: send_amount,
         }],
+        source_addresses: None,
         subtract_fee_from_amount: false,
         memo: Some("is_ours test".to_string()),
         override_fee: None,

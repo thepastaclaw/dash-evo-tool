@@ -124,6 +124,7 @@ pub struct WalletPaymentRequest {
     pub recipients: Vec<PaymentRecipient>,
     pub subtract_fee_from_amount: bool,
     pub memo: Option<String>,
+    pub source_addresses: Option<Vec<Address>>,
     /// Override fee to use instead of calculated fee (for retry after min relay fee error)
     pub override_fee: Option<u64>,
 }
@@ -529,15 +530,32 @@ impl AppContext {
             if !wallet_guard.is_open() {
                 return Err(TaskError::WalletLocked);
             }
-            wallet_guard
-                .build_multi_recipient_payment_transaction(
-                    self,
-                    self.network,
-                    &parsed_recipients,
-                    DEFAULT_TX_FEE,
-                    request.subtract_fee_from_amount,
-                )
-                .map_err(|e| TaskError::WalletPaymentFailed { detail: e })?
+            if let Some(source_addresses) = request
+                .source_addresses
+                .as_deref()
+                .filter(|addresses| !addresses.is_empty())
+            {
+                wallet_guard
+                    .build_multi_recipient_payment_transaction_for_selected_addresses(
+                        self,
+                        self.network,
+                        &parsed_recipients,
+                        DEFAULT_TX_FEE,
+                        request.subtract_fee_from_amount,
+                        source_addresses,
+                    )
+                    .map_err(|e| TaskError::WalletPaymentFailed { detail: e })?
+            } else {
+                wallet_guard
+                    .build_multi_recipient_payment_transaction(
+                        self,
+                        self.network,
+                        &parsed_recipients,
+                        DEFAULT_TX_FEE,
+                        request.subtract_fee_from_amount,
+                    )
+                    .map_err(|e| TaskError::WalletPaymentFailed { detail: e })?
+            }
         };
 
         let txid = self
@@ -583,28 +601,63 @@ impl AppContext {
                 detail: "Wallet not loaded into SPV".to_string(),
             })?;
 
-        let tx = {
-            let wm_arc = self.spv_manager.wallet();
-            let mut wm = wm_arc.write().await;
-            let unsigned = self.build_spv_unsigned_transaction_multi(
-                &mut wm,
-                &wallet_id,
-                &parsed_recipients,
-                &request,
-            )?;
-            let signed = self.sign_spv_transaction(&mut wm, &wallet_id, unsigned)?;
+        let (tx, selected_utxos) = {
+            if let Some(source_addresses) = request
+                .source_addresses
+                .as_deref()
+                .filter(|addresses| !addresses.is_empty())
+            {
+                let mut wallet_guard = wallet.write()?;
+                if !wallet_guard.is_open() {
+                    return Err(TaskError::WalletLocked);
+                }
+                wallet_guard
+                    .build_multi_recipient_payment_transaction_for_selected_addresses_uncommitted(
+                        self,
+                        self.network,
+                        &parsed_recipients,
+                        1_000,
+                        request.subtract_fee_from_amount,
+                        source_addresses,
+                    )
+                    .map(|(tx, utxos)| (tx, Some(utxos)))
+                    .map_err(|e| TaskError::WalletPaymentFailed { detail: e })?
+            } else {
+                let wm_arc = self.spv_manager.wallet();
+                let mut wm = wm_arc.write().await;
+                let unsigned = self.build_spv_unsigned_transaction_multi(
+                    &mut wm,
+                    &wallet_id,
+                    &parsed_recipients,
+                    &request,
+                )?;
+                let signed = self.sign_spv_transaction(&mut wm, &wallet_id, unsigned)?;
 
-            // Notify the wallet about the outgoing tx while still holding the
-            // write lock. This marks spent UTXOs immediately so concurrent
-            // callers don't select the same inputs (double-spend prevention).
-            let _ = wm.process_mempool_transaction(&signed, None).await;
-            signed
+                // Notify the wallet about the outgoing tx while still holding the
+                // write lock. This marks spent UTXOs immediately so concurrent
+                // callers don't select the same inputs (double-spend prevention).
+                let _ = wm.process_mempool_transaction(&signed, None).await;
+                (signed, None)
+            }
         };
 
         self.spv_manager
             .broadcast_transaction(&tx)
             .await
             .map_err(|e| TaskError::SpvBroadcastFailed { detail: e })?;
+
+        if selected_utxos.is_some() {
+            let wm_arc = self.spv_manager.wallet();
+            let mut wm = wm_arc.write().await;
+            let _ = wm.process_mempool_transaction(&tx, None).await;
+        }
+
+        if let Some(selected_utxos) = &selected_utxos {
+            let mut wallet_guard = wallet.write()?;
+            wallet_guard
+                .remove_selected_utxos(selected_utxos, &self.db, self.network)
+                .map_err(|detail| TaskError::WalletPaymentFailed { detail })?;
+        }
 
         self.reconcile_spv_wallets().await?;
 

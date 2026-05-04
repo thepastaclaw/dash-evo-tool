@@ -31,13 +31,36 @@ impl Wallet {
         allow_take_fee_from_amount: bool,
         source_address: Option<&Address>,
     ) -> Option<(BTreeMap<OutPoint, (TxOut, Address)>, Option<u64>)> {
+        self.select_unspent_utxos_for_addresses(
+            amount,
+            fee,
+            allow_take_fee_from_amount,
+            source_address.map(std::slice::from_ref),
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn select_unspent_utxos_for_addresses(
+        &self,
+        amount: u64,
+        fee: u64,
+        allow_take_fee_from_amount: bool,
+        source_addresses: Option<&[Address]>,
+    ) -> Option<(BTreeMap<OutPoint, (TxOut, Address)>, Option<u64>)> {
         let target = amount.checked_add(fee)?;
         let mut required: i64 = i64::try_from(target).ok()?;
         let mut selected_utxos = BTreeMap::new();
 
+        let selected_sources;
         let iter: Box<dyn Iterator<Item = (&Address, &HashMap<OutPoint, TxOut>)>> =
-            match source_address {
-                Some(addr) => Box::new(self.utxos.get(addr).into_iter().map(move |m| (addr, m))),
+            match source_addresses {
+                Some(addresses) => {
+                    selected_sources = addresses
+                        .iter()
+                        .filter_map(|addr| self.utxos.get(addr).map(|utxos| (addr, utxos)))
+                        .collect::<Vec<_>>();
+                    Box::new(selected_sources.into_iter())
+                }
                 None => Box::new(self.utxos.iter()),
             };
         for (address, outpoints) in iter {

@@ -1918,6 +1918,71 @@ impl Wallet {
         fee: u64,
         subtract_fee_from_amount: bool,
     ) -> Result<Transaction, String> {
+        self.build_multi_recipient_payment_transaction_internal(
+            app_context,
+            network,
+            recipients,
+            fee,
+            subtract_fee_from_amount,
+            None,
+            true,
+        )
+        .map(|(tx, _)| tx)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn build_multi_recipient_payment_transaction_for_selected_addresses_uncommitted(
+        &mut self,
+        app_context: &AppContext,
+        network: Network,
+        recipients: &[(Address, u64)],
+        fee: u64,
+        subtract_fee_from_amount: bool,
+        source_addresses: &[Address],
+    ) -> Result<(Transaction, BTreeMap<OutPoint, (TxOut, Address)>), String> {
+        self.build_multi_recipient_payment_transaction_internal(
+            app_context,
+            network,
+            recipients,
+            fee,
+            subtract_fee_from_amount,
+            Some(source_addresses),
+            false,
+        )
+    }
+
+    pub fn build_multi_recipient_payment_transaction_for_selected_addresses(
+        &mut self,
+        app_context: &AppContext,
+        network: Network,
+        recipients: &[(Address, u64)],
+        fee: u64,
+        subtract_fee_from_amount: bool,
+        source_addresses: &[Address],
+    ) -> Result<Transaction, String> {
+        self.build_multi_recipient_payment_transaction_internal(
+            app_context,
+            network,
+            recipients,
+            fee,
+            subtract_fee_from_amount,
+            Some(source_addresses),
+            true,
+        )
+        .map(|(tx, _)| tx)
+    }
+
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn build_multi_recipient_payment_transaction_internal(
+        &mut self,
+        app_context: &AppContext,
+        network: Network,
+        recipients: &[(Address, u64)],
+        fee: u64,
+        subtract_fee_from_amount: bool,
+        source_addresses: Option<&[Address]>,
+        remove_selected_utxos: bool,
+    ) -> Result<(Transaction, BTreeMap<OutPoint, (TxOut, Address)>), String> {
         if recipients.is_empty() {
             return Err("No recipients specified".to_string());
         }
@@ -1940,7 +2005,12 @@ impl Wallet {
         // the transaction is fully built and signed, so that a failure at any later
         // step cannot permanently drop UTXOs from the wallet.
         let (utxos, change_option) = self
-            .select_unspent_utxos_for(total_amount, fee, subtract_fee_from_amount, None)
+            .select_unspent_utxos_for_addresses(
+                total_amount,
+                fee,
+                subtract_fee_from_amount,
+                source_addresses,
+            )
             .ok_or_else(|| "Insufficient funds".to_string())?;
 
         // Build outputs for each recipient
@@ -2056,10 +2126,12 @@ impl Wallet {
                 Ok::<(), String>(())
             })?;
 
-        // Transaction is fully built and signed; commit the UTXO removals now.
-        self.remove_selected_utxos(&utxos, &app_context.db, network)?;
+        if remove_selected_utxos {
+            // Transaction is fully built and signed; commit the UTXO removals now.
+            self.remove_selected_utxos(&utxos, &app_context.db, network)?;
+        }
 
-        Ok(tx)
+        Ok((tx, utxos))
     }
 
     pub fn update_address_balance(
@@ -3040,7 +3112,6 @@ mod tests {
     /// `update_address_balance` can find the row.
     /// Caller must store the wallet first via `db.store_wallet()`.
     fn register_test_address(db: &Database, wallet: &Wallet, address: &Address) {
-        let seed_hash = wallet.seed_hash();
         let path = DerivationPath::from(vec![
             ChildNumber::Hardened { index: 44 },
             ChildNumber::Hardened { index: 1 },
@@ -3048,12 +3119,23 @@ mod tests {
             ChildNumber::Normal { index: 0 },
             ChildNumber::Normal { index: 0 },
         ]);
+        register_test_address_with_path(db, wallet, address, &path, DerivationPathReference::BIP44);
+    }
+
+    fn register_test_address_with_path(
+        db: &Database,
+        wallet: &Wallet,
+        address: &Address,
+        path: &DerivationPath,
+        path_reference: DerivationPathReference,
+    ) {
+        let seed_hash = wallet.seed_hash();
         db.add_address_if_not_exists(
             &seed_hash,
             address,
             &Network::Testnet,
-            &path,
-            DerivationPathReference::BIP44,
+            path,
+            path_reference,
             DerivationPathType::CLEAR_FUNDS,
             Some(0),
         )
@@ -3104,6 +3186,63 @@ mod tests {
             .unwrap();
 
         assert!(!wallet.utxos.contains_key(&addr));
+    }
+
+    #[test]
+    fn test_selected_source_address_spend_zeroes_legacy_bip32_balance() {
+        use crate::database::test_helpers::create_test_database;
+
+        let mut wallet = test_wallet();
+        let legacy_addr = test_address(11);
+        let other_addr = test_address(22);
+        let legacy_path = DerivationPath::from(vec![
+            ChildNumber::Hardened { index: 0 },
+            ChildNumber::Normal { index: 0 },
+        ]);
+
+        register_address_locally(&mut wallet, &legacy_addr, &legacy_path);
+        wallet
+            .watched_addresses
+            .get_mut(&legacy_path)
+            .expect("legacy path registered")
+            .path_reference = DerivationPathReference::BIP32;
+        add_utxo(&mut wallet, &legacy_addr, 11, 0, 100_000);
+        add_utxo(&mut wallet, &other_addr, 22, 0, 200_000);
+
+        let db = create_test_database().expect("test db");
+        db.store_wallet(&wallet, &Network::Testnet)
+            .expect("store test wallet");
+        register_test_address_with_path(
+            &db,
+            &wallet,
+            &legacy_addr,
+            &legacy_path,
+            DerivationPathReference::BIP32,
+        );
+
+        let selected_addresses = vec![legacy_addr.clone()];
+        let (selected, change) = wallet
+            .select_unspent_utxos_for_addresses(90_000, 10_000, false, Some(&selected_addresses))
+            .expect("selected legacy utxo");
+
+        assert!(change.is_none());
+        assert_eq!(selected.len(), 1);
+        assert!(selected.values().all(|(_, addr)| addr == &legacy_addr));
+
+        wallet
+            .remove_selected_utxos(&selected, &db, Network::Testnet)
+            .expect("remove selected utxos");
+
+        assert_eq!(wallet.address_balances.get(&legacy_addr), Some(&0));
+        assert!(!wallet.utxos.contains_key(&legacy_addr));
+        assert_eq!(
+            wallet
+                .utxos
+                .get(&other_addr)
+                .and_then(|utxos| utxos.values().next())
+                .map(|tx_out| tx_out.value),
+            Some(200_000)
+        );
     }
 
     // ========================================================================

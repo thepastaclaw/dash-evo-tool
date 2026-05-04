@@ -1133,6 +1133,7 @@ impl WalletsBalancesScreen {
             } else {
                 Some(memo.to_string())
             },
+            source_addresses: None,
             override_fee: None,
         };
 

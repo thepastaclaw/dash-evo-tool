@@ -254,6 +254,7 @@ impl AsyncTool<DashMcpService> for SendCoreFunds {
             }],
             subtract_fee_from_amount: false,
             memo: None,
+            source_addresses: None,
             override_fee: None,
         };
 

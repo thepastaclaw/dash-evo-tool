@@ -106,6 +106,7 @@ pub async fn cleanup_test_wallets(
                 address: framework_address.clone(),
                 amount_duffs: spendable,
             }],
+            source_addresses: None,
             subtract_fee_from_amount: true,
             memo: Some("E2E cleanup: sweep orphaned wallet".to_string()),
             override_fee: None,

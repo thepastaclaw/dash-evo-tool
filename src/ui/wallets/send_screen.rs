@@ -902,6 +902,7 @@ impl WalletSendScreen {
                     recipients: vec![recipient],
                     subtract_fee_from_amount: self.subtract_fee,
                     memo: None,
+                    source_addresses: None,
                     override_fee: None,
                 },
             },
@@ -3270,6 +3271,12 @@ impl WalletSendScreen {
                     recipients,
                     subtract_fee_from_amount: self.subtract_fee,
                     memo: None,
+                    source_addresses: Some(
+                        self.core_inputs
+                            .iter()
+                            .map(|input| input.address.clone())
+                            .collect(),
+                    ),
                     override_fee: None,
                 },
             },

@@ -8,10 +8,14 @@ use dash_sdk::dpp::identity::accessors::IdentityGettersV0;
 use dash_sdk::dpp::key_wallet::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey};
 use dash_sdk::dpp::platform_value::Value;
 use dash_sdk::drive::query::{OrderClause, WhereClause, WhereOperator};
+use dash_sdk::platform::proto::get_documents_request::get_documents_request_v0::Start;
 use dash_sdk::platform::{Document, DocumentQuery, Fetch, FetchMany, Identifier};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
+
+/// Page size used when paginating through DashPay queries.
+const DASHPAY_QUERY_PAGE_SIZE: u32 = 100;
 
 // DashPay contract ID from the platform repo
 pub const DASHPAY_CONTRACT_ID: [u8; 32] = [
@@ -194,6 +198,62 @@ pub struct ContactData {
     pub bio: Option<String>,
 }
 
+/// Fetch all documents matching `query`, paginating through pages of `DASHPAY_QUERY_PAGE_SIZE`
+/// using `Start::StartAfter(last_doc_id)` until fewer than a full page is returned.
+///
+/// `context` is included in error messages to identify which query failed.
+async fn fetch_all_documents_paginated(
+    sdk: &Sdk,
+    mut query: DocumentQuery,
+    context: &str,
+) -> Result<Vec<(Identifier, Document)>, String> {
+    query.limit = DASHPAY_QUERY_PAGE_SIZE;
+    let mut all: Vec<(Identifier, Document)> = Vec::new();
+
+    loop {
+        let page = Document::fetch_many(sdk, query.clone())
+            .await
+            .map_err(|e| format!("Error fetching {}: {}", context, e))?;
+
+        let page_len = page.len();
+        let last_id = page.keys().last().copied();
+
+        for (id, doc_opt) in page {
+            if let Some(doc) = doc_opt {
+                all.push((id, doc));
+            }
+        }
+
+        if page_len < DASHPAY_QUERY_PAGE_SIZE as usize {
+            break;
+        }
+        let Some(last_id) = last_id else { break };
+        query.start = Some(Start::StartAfter(last_id.to_buffer().to_vec()));
+    }
+
+    Ok(all)
+}
+
+/// Compute the set of mutual contacts: identities present both as the owner of an
+/// incoming contactRequest and as the `toUserId` of an outgoing contactRequest.
+///
+/// Pure helper extracted so the intersection logic can be unit tested without
+/// constructing live `Document`s.
+pub(crate) fn find_mutual_contacts<I, O>(
+    incoming_owner_ids: I,
+    outgoing_to_user_ids: O,
+) -> HashSet<Identifier>
+where
+    I: IntoIterator<Item = Identifier>,
+    O: IntoIterator<Item = Identifier>,
+{
+    let outgoing_set: HashSet<Identifier> = outgoing_to_user_ids.into_iter().collect();
+    incoming_owner_ids
+        .into_iter()
+        .filter(|id| outgoing_set.contains(id))
+        .collect()
+}
+
 pub async fn load_contacts(
     app_context: &Arc<AppContext>,
     sdk: &Sdk,
@@ -202,74 +262,64 @@ pub async fn load_contacts(
     let identity_id = identity.identity.id();
     let dashpay_contract = app_context.dashpay_contract.clone();
 
-    // Query for contact requests where we are the sender (ownerId)
+    // Query for contact requests where we are the sender (ownerId).
+    // The explicit $createdAt orderBy is a workaround for the Platform bug where
+    // queries without an orderBy can return 0 results even when documents exist
+    // (matches the workaround used in contact_requests.rs::load_contact_requests).
     let mut outgoing_query = DocumentQuery::new(dashpay_contract.clone(), "contactRequest")
         .map_err(|e| format!("Failed to create query: {}", e))?;
+    outgoing_query = outgoing_query
+        .with_where(WhereClause {
+            field: "$ownerId".to_string(),
+            operator: WhereOperator::Equal,
+            value: Value::Identifier(identity_id.to_buffer()),
+        })
+        .with_order_by(OrderClause {
+            field: "$createdAt".to_string(),
+            ascending: true,
+        });
 
-    outgoing_query = outgoing_query.with_where(WhereClause {
-        field: "$ownerId".to_string(),
-        operator: WhereOperator::Equal,
-        value: Value::Identifier(identity_id.to_buffer()),
-    });
-    outgoing_query.limit = 100;
-
-    // Query for contact requests where we are the recipient (toUserId)
+    // Query for contact requests where we are the recipient (toUserId).
     let mut incoming_query = DocumentQuery::new(dashpay_contract.clone(), "contactRequest")
         .map_err(|e| format!("Failed to create query: {}", e))?;
+    incoming_query = incoming_query
+        .with_where(WhereClause {
+            field: "toUserId".to_string(),
+            operator: WhereOperator::Equal,
+            value: Value::Identifier(identity_id.to_buffer()),
+        })
+        .with_order_by(OrderClause {
+            field: "$createdAt".to_string(),
+            ascending: true,
+        });
 
-    incoming_query = incoming_query.with_where(WhereClause {
-        field: "toUserId".to_string(),
-        operator: WhereOperator::Equal,
-        value: Value::Identifier(identity_id.to_buffer()),
-    });
-
-    // Add orderBy workaround for Platform bug
-    incoming_query = incoming_query.with_order_by(OrderClause {
-        field: "$createdAt".to_string(),
-        ascending: true,
-    });
-    incoming_query.limit = 100;
-
-    // Fetch both incoming and outgoing contact requests
-    let outgoing_docs = Document::fetch_many(sdk, outgoing_query)
-        .await
-        .map_err(|e| format!("Error fetching outgoing contacts: {}", e))?;
-
-    let incoming_docs = Document::fetch_many(sdk, incoming_query)
-        .await
-        .map_err(|e| format!("Error fetching incoming contacts: {}", e))?;
-
-    // Convert to vectors for easier processing
-    let outgoing: Vec<(Identifier, Document)> = outgoing_docs
-        .into_iter()
-        .filter_map(|(id, doc)| doc.map(|d| (id, d)))
-        .collect();
-
-    let incoming: Vec<(Identifier, Document)> = incoming_docs
-        .into_iter()
-        .filter_map(|(id, doc)| doc.map(|d| (id, d)))
-        .collect();
+    // Fetch all pages so identities with many contacts don't lose reciprocal matches
+    // because of a fixed first-page limit.
+    let outgoing =
+        fetch_all_documents_paginated(sdk, outgoing_query, "outgoing contact requests").await?;
+    let incoming =
+        fetch_all_documents_paginated(sdk, incoming_query, "incoming contact requests").await?;
 
     // Find mutual contacts (where both parties have sent requests to each other)
-    let mut contacts = HashSet::new();
-
-    for (_, incoming_doc) in incoming.iter() {
-        let from_id = incoming_doc.owner_id();
-
-        // Check if we also sent a request to this person
-        for (_, outgoing_doc) in outgoing.iter() {
-            if let Some(Value::Identifier(to_id_bytes)) = outgoing_doc.properties().get("toUserId")
-            {
-                let to_id = Identifier::from_bytes(to_id_bytes.as_slice()).unwrap();
-                if to_id == from_id {
-                    // Mutual contact found
-                    contacts.insert(from_id);
+    let incoming_owner_ids = incoming.iter().map(|(_, doc)| doc.owner_id());
+    let outgoing_to_user_ids =
+        outgoing
+            .iter()
+            .filter_map(|(_, doc)| match doc.properties().get("toUserId") {
+                Some(Value::Identifier(to_id_bytes)) => {
+                    match Identifier::from_bytes(to_id_bytes.as_slice()) {
+                        Ok(id) => Some(id),
+                        Err(_) => {
+                            tracing::warn!("Invalid toUserId in outgoing contactRequest, skipping");
+                            None
+                        }
+                    }
                 }
-            }
-        }
-    }
+                _ => None,
+            });
+    let contacts = find_mutual_contacts(incoming_owner_ids, outgoing_to_user_ids);
 
-    // Now query for contact info documents
+    // Now query for contact info documents (also paginated).
     let mut contact_info_query = DocumentQuery::new(dashpay_contract.clone(), "contactInfo")
         .map_err(|e| format!("Failed to create query: {}", e))?;
 
@@ -278,112 +328,110 @@ pub async fn load_contacts(
         operator: WhereOperator::Equal,
         value: Value::Identifier(identity_id.to_buffer()),
     });
-    contact_info_query.limit = 100;
 
-    let contact_info_docs = Document::fetch_many(sdk, contact_info_query)
-        .await
-        .map_err(|e| format!("Error fetching contact info: {}", e))?;
+    let contact_info_docs =
+        fetch_all_documents_paginated(sdk, contact_info_query, "contact info").await?;
 
     // Build a map of contact ID to contact info
     let mut contact_info_map: HashMap<Identifier, ContactData> = HashMap::new();
 
     for (_doc_id, doc) in contact_info_docs.iter() {
-        if let Some(doc) = doc {
-            let props = doc.properties();
+        let props = doc.properties();
 
-            // Get the derivation index used for this document
-            if let Some(Value::U32(deriv_idx)) = props.get("derivationEncryptionKeyIndex") {
-                // Derive keys for this document
-                let (enc_user_id_key, private_data_key) =
-                    match derive_contact_info_keys(&identity, *deriv_idx) {
-                        Ok(keys) => keys,
-                        Err(_) => continue,
-                    };
+        // Get the derivation index used for this document
+        if let Some(Value::U32(deriv_idx)) = props.get("derivationEncryptionKeyIndex") {
+            // Derive keys for this document
+            let (enc_user_id_key, private_data_key) =
+                match derive_contact_info_keys(&identity, *deriv_idx) {
+                    Ok(keys) => keys,
+                    Err(_) => continue,
+                };
 
-                // Decrypt encToUserId to find which contact this is for
-                if let Some(Value::Bytes(enc_user_id)) = props.get("encToUserId")
-                    && let Ok(decrypted_id) = decrypt_to_user_id(enc_user_id, &enc_user_id_key)
+            // Decrypt encToUserId to find which contact this is for
+            if let Some(Value::Bytes(enc_user_id)) = props.get("encToUserId")
+                && let Ok(decrypted_id) = decrypt_to_user_id(enc_user_id, &enc_user_id_key)
+            {
+                let Ok(contact_id) = Identifier::from_bytes(&decrypted_id) else {
+                    tracing::warn!("Decrypted contact id was not a valid Identifier, skipping");
+                    continue;
+                };
+
+                // Decrypt private data if available
+                let mut nickname = None;
+                let mut note = None;
+                let mut is_hidden = false;
+                let mut account_reference = 0u32;
+
+                if let Some(Value::Bytes(encrypted_private)) = props.get("privateData")
+                    && let Ok(decrypted_data) =
+                        decrypt_private_data(encrypted_private, &private_data_key)
                 {
-                    let contact_id = Identifier::from_bytes(&decrypted_id).unwrap();
+                    // Parse the decrypted data
+                    // Simple format: version(4) + alias_len(1) + alias + note_len(1) + note + hidden(1) + accounts_len(1) + accounts
+                    if decrypted_data.len() >= 8 {
+                        let mut pos = 4; // Skip version
 
-                    // Decrypt private data if available
-                    let mut nickname = None;
-                    let mut note = None;
-                    let mut is_hidden = false;
-                    let mut account_reference = 0u32;
-
-                    if let Some(Value::Bytes(encrypted_private)) = props.get("privateData")
-                        && let Ok(decrypted_data) =
-                            decrypt_private_data(encrypted_private, &private_data_key)
-                    {
-                        // Parse the decrypted data
-                        // Simple format: version(4) + alias_len(1) + alias + note_len(1) + note + hidden(1) + accounts_len(1) + accounts
-                        if decrypted_data.len() >= 8 {
-                            let mut pos = 4; // Skip version
-
-                            // Read alias
-                            if pos < decrypted_data.len() {
-                                let alias_len = decrypted_data[pos] as usize;
-                                pos += 1;
-                                if pos + alias_len <= decrypted_data.len() && alias_len > 0 {
-                                    nickname = String::from_utf8(
-                                        decrypted_data[pos..pos + alias_len].to_vec(),
-                                    )
-                                    .ok();
-                                    pos += alias_len;
-                                }
+                        // Read alias
+                        if pos < decrypted_data.len() {
+                            let alias_len = decrypted_data[pos] as usize;
+                            pos += 1;
+                            if pos + alias_len <= decrypted_data.len() && alias_len > 0 {
+                                nickname = String::from_utf8(
+                                    decrypted_data[pos..pos + alias_len].to_vec(),
+                                )
+                                .ok();
+                                pos += alias_len;
                             }
+                        }
 
-                            // Read note
-                            if pos < decrypted_data.len() {
-                                let note_len = decrypted_data[pos] as usize;
-                                pos += 1;
-                                if pos + note_len <= decrypted_data.len() && note_len > 0 {
-                                    note = String::from_utf8(
-                                        decrypted_data[pos..pos + note_len].to_vec(),
-                                    )
-                                    .ok();
-                                    pos += note_len;
-                                }
+                        // Read note
+                        if pos < decrypted_data.len() {
+                            let note_len = decrypted_data[pos] as usize;
+                            pos += 1;
+                            if pos + note_len <= decrypted_data.len() && note_len > 0 {
+                                note =
+                                    String::from_utf8(decrypted_data[pos..pos + note_len].to_vec())
+                                        .ok();
+                                pos += note_len;
                             }
+                        }
 
-                            // Read hidden flag
-                            if pos < decrypted_data.len() {
-                                is_hidden = decrypted_data[pos] != 0;
-                                pos += 1;
-                            }
+                        // Read hidden flag
+                        if pos < decrypted_data.len() {
+                            is_hidden = decrypted_data[pos] != 0;
+                            pos += 1;
+                        }
 
-                            // Read accounts (simplified - just take first if available)
-                            if pos < decrypted_data.len() {
-                                let accounts_len = decrypted_data[pos] as usize;
-                                pos += 1;
-                                if accounts_len > 0 && pos + 4 <= decrypted_data.len() {
-                                    account_reference = u32::from_le_bytes([
-                                        decrypted_data[pos],
-                                        decrypted_data[pos + 1],
-                                        decrypted_data[pos + 2],
-                                        decrypted_data[pos + 3],
-                                    ]);
-                                }
+                        // Read accounts (simplified - just take first if available)
+                        if pos < decrypted_data.len() {
+                            let accounts_len = decrypted_data[pos] as usize;
+                            pos += 1;
+                            if accounts_len > 0 && pos + 4 <= decrypted_data.len() {
+                                account_reference = u32::from_le_bytes([
+                                    decrypted_data[pos],
+                                    decrypted_data[pos + 1],
+                                    decrypted_data[pos + 2],
+                                    decrypted_data[pos + 3],
+                                ]);
                             }
                         }
                     }
-
-                    contact_info_map.insert(
-                        contact_id,
-                        ContactData {
-                            identity_id: contact_id,
-                            nickname,
-                            note,
-                            is_hidden,
-                            account_reference,
-                            username: None,
-                            display_name: None,
-                            avatar_url: None,
-                            bio: None,
-                        },
-                    );
                 }
+
+                contact_info_map.insert(
+                    contact_id,
+                    ContactData {
+                        identity_id: contact_id,
+                        nickname,
+                        note,
+                        is_hidden,
+                        account_reference,
+                        username: None,
+                        display_name: None,
+                        avatar_url: None,
+                        bio: None,
+                    },
+                );
             }
         }
     }
@@ -517,4 +565,80 @@ pub async fn remove_contact(
     // TODO: Implement contact removal
     // This would involve deleting the contactInfo document if it exists
     Err("Contact removal is not yet implemented".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(byte: u8) -> Identifier {
+        Identifier::from_bytes(&[byte; 32]).expect("32 bytes is a valid Identifier")
+    }
+
+    #[test]
+    fn mutual_contacts_intersect_only_reciprocal_pairs() {
+        // Incoming: requests from A, B, C to us.
+        // Outgoing: requests from us to B, C, D.
+        // Mutual contacts should be {B, C}.
+        let incoming = vec![id(0xA1), id(0xB2), id(0xC3)];
+        let outgoing = vec![id(0xB2), id(0xC3), id(0xD4)];
+
+        let mutual = find_mutual_contacts(incoming, outgoing);
+
+        assert_eq!(mutual.len(), 2);
+        assert!(mutual.contains(&id(0xB2)));
+        assert!(mutual.contains(&id(0xC3)));
+        assert!(!mutual.contains(&id(0xA1)));
+        assert!(!mutual.contains(&id(0xD4)));
+    }
+
+    #[test]
+    fn mutual_contacts_handles_pagination_across_sets() {
+        // Simulate pagination behavior: an outgoing match for one of our incoming
+        // requests lives at position 150, well beyond a single fixed page of 100.
+        // Once both sets are fully fetched, the intersection still finds it.
+        let incoming: Vec<Identifier> = (0..200u32).map(|i| id((i % 256) as u8)).collect();
+        let mut outgoing: Vec<Identifier> = (50..250u32).map(|i| id((i % 256) as u8)).collect();
+        outgoing.push(id(0xFE));
+
+        let mutual = find_mutual_contacts(incoming.clone(), outgoing);
+
+        // Every incoming id at >= 50 should be matched (the loop wraps mod 256, so
+        // the dedup happens via HashSet collection).
+        for ident in incoming.iter().skip(50) {
+            assert!(mutual.contains(ident), "expected {:?} in mutual set", ident);
+        }
+        assert!(!mutual.contains(&id(0xFE))); // 0xFE only in outgoing
+    }
+
+    #[test]
+    fn mutual_contacts_empty_when_no_overlap() {
+        let incoming = vec![id(0x01), id(0x02)];
+        let outgoing = vec![id(0x03), id(0x04)];
+
+        let mutual = find_mutual_contacts(incoming, outgoing);
+        assert!(mutual.is_empty());
+    }
+
+    #[test]
+    fn mutual_contacts_empty_when_either_side_empty() {
+        let incoming: Vec<Identifier> = vec![];
+        let outgoing = vec![id(0x01)];
+        assert!(find_mutual_contacts(incoming, outgoing).is_empty());
+
+        let incoming = vec![id(0x01)];
+        let outgoing: Vec<Identifier> = vec![];
+        assert!(find_mutual_contacts(incoming, outgoing).is_empty());
+    }
+
+    #[test]
+    fn mutual_contacts_dedups_repeated_incoming() {
+        // If an identity appears twice in the incoming list (e.g. weird platform
+        // state), the result is still a set, so no duplicates leak through.
+        let incoming = vec![id(0xAA), id(0xAA), id(0xBB)];
+        let outgoing = vec![id(0xAA), id(0xBB)];
+
+        let mutual = find_mutual_contacts(incoming, outgoing);
+        assert_eq!(mutual.len(), 2);
+    }
 }

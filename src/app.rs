@@ -66,36 +66,105 @@ impl From<Result<BackendTaskSuccessResult, TaskError>> for TaskResult {
     }
 }
 
+/// Throttle interval between OS system-theme detection attempts while the
+/// preference is `ThemeMode::System`.
+const THEME_DETECT_INTERVAL: Duration = Duration::from_secs(2);
+
 struct ThemeState {
     preference: ThemeMode,
+    /// Cached resolved theme — always `Light` or `Dark`, never `System`.
+    /// Acts as the fallback while async detection is in flight.
     resolved: ThemeMode,
     last_applied: Option<ThemeMode>,
+    /// Timestamp of the most recent detection dispatch, used to throttle
+    /// repeated detection attempts while preference is `System`.
     last_checked: Instant,
+    /// `true` between dispatching a detection attempt and receiving its
+    /// result; prevents overlapping detection threads.
+    detection_in_flight: bool,
+    detection_tx: egui_mpsc::SenderSync<Option<ThemeMode>>,
+    detection_rx: mpsc::Receiver<Option<ThemeMode>>,
 }
 
 impl ThemeState {
-    fn new(preference: ThemeMode) -> Self {
-        Self {
-            resolved: crate::ui::theme::resolve_theme_mode(preference),
+    fn new(ctx: &egui::Context, preference: ThemeMode) -> Self {
+        let (detection_tx, detection_rx) = mpsc::channel().with_egui_ctx(ctx.clone());
+        // Initial resolved theme is chosen synchronously and never blocks: for
+        // `System`, fall back to `Light` until the first async detection
+        // result arrives. The actual OS detection happens off-thread to avoid
+        // stalling the UI frame loop on platforms where `dark_light::detect`
+        // is slow (e.g., Linux XDG Desktop Portal / D-Bus).
+        let resolved = match preference {
+            ThemeMode::Light | ThemeMode::System => ThemeMode::Light,
+            ThemeMode::Dark => ThemeMode::Dark,
+        };
+        let mut state = Self {
+            preference,
+            resolved,
             last_applied: None,
             last_checked: Instant::now(),
-            preference,
+            detection_in_flight: false,
+            detection_tx,
+            detection_rx,
+        };
+        if preference == ThemeMode::System {
+            state.spawn_detection();
+        }
+        state
+    }
+
+    /// Dispatch an OS theme detection on a dedicated thread.
+    ///
+    /// `dark_light::detect()` can block for ~100 ms on Linux while talking to
+    /// the XDG Desktop Portal over D-Bus, so it must never run on the UI
+    /// thread. A no-op if a detection thread is already in flight.
+    fn spawn_detection(&mut self) {
+        if self.detection_in_flight {
+            return;
+        }
+        self.detection_in_flight = true;
+        self.last_checked = Instant::now();
+        let tx = self.detection_tx.clone();
+        if let Err(e) = std::thread::Builder::new()
+            .name("os-theme-detect".to_string())
+            .spawn(move || {
+                let detected = match dark_light::detect() {
+                    Ok(dark_light::Mode::Dark) => Some(ThemeMode::Dark),
+                    Ok(dark_light::Mode::Light | dark_light::Mode::Unspecified) => {
+                        Some(ThemeMode::Light)
+                    }
+                    Err(e) => {
+                        tracing::debug!("OS theme detection failed: {e}");
+                        None
+                    }
+                };
+                let _ = tx.send(detected);
+            })
+        {
+            tracing::warn!("Failed to spawn OS theme detection thread: {e}");
+            self.detection_in_flight = false;
         }
     }
 
-    /// Polls the OS for system theme changes (throttled to every 2s) and
-    /// applies the theme if it changed. Returns `true` if the theme was applied.
+    /// Drains any completed detection results, schedules the next throttled
+    /// detection attempt while preference is `System`, and applies the
+    /// resolved theme if it has changed. Returns `true` if the theme was
+    /// (re)applied. Never blocks on OS theme detection.
     fn poll_and_apply(&mut self, ctx: &egui::Context) -> bool {
-        if self.preference == ThemeMode::System {
-            let now = Instant::now();
-            if now.duration_since(self.last_checked) >= Duration::from_secs(2) {
-                self.last_checked = now;
-                if let Some(detected) = crate::ui::theme::try_detect_system_theme()
-                    && detected != self.resolved
-                {
-                    self.resolved = detected;
-                }
+        // Drain any completed detection results.
+        while let Ok(detected) = self.detection_rx.try_recv() {
+            self.detection_in_flight = false;
+            if let Some(theme) = detected {
+                self.resolved = theme;
             }
+            // On detection failure (None), keep the cached resolved theme.
+        }
+        // Throttled re-detection while in System preference.
+        if self.preference == ThemeMode::System
+            && !self.detection_in_flight
+            && self.last_checked.elapsed() >= THEME_DETECT_INTERVAL
+        {
+            self.spawn_detection();
         }
         if self.last_applied != Some(self.resolved) {
             crate::ui::theme::apply_theme(ctx, self.resolved);
@@ -106,24 +175,22 @@ impl ThemeState {
         }
     }
 
-    fn apply_new_preference(&mut self, ctx: &egui::Context, new_theme: ThemeMode) -> bool {
+    /// Update the user's theme preference. For `System`, the current cached
+    /// resolved theme is kept as a fallback while a fresh OS detection runs
+    /// off-thread; the UI thread never blocks on detection.
+    fn apply_new_preference(&mut self, ctx: &egui::Context, new_theme: ThemeMode) {
         self.preference = new_theme;
-        let mut detection_failed = false;
-        self.resolved = if new_theme == ThemeMode::System {
-            match crate::ui::theme::try_detect_system_theme() {
-                Some(detected) => detected,
-                None => {
-                    detection_failed = true;
-                    self.resolved
-                }
+        match new_theme {
+            ThemeMode::Light => self.resolved = ThemeMode::Light,
+            ThemeMode::Dark => self.resolved = ThemeMode::Dark,
+            ThemeMode::System => {
+                // Keep the current resolved theme as fallback until the
+                // off-thread detection returns a result.
+                self.spawn_detection();
             }
-        } else {
-            new_theme
-        };
-        self.last_checked = Instant::now();
+        }
         crate::ui::theme::apply_theme(ctx, self.resolved);
         self.last_applied = Some(self.resolved);
-        detection_failed
     }
 }
 
@@ -567,7 +634,7 @@ impl AppState {
             core_message_receiver,
             task_result_sender,
             task_result_receiver,
-            theme: ThemeState::new(theme_preference),
+            theme: ThemeState::new(&ctx, theme_preference),
             last_scheduled_vote_check: Instant::now(),
             last_repaint_request: Instant::now(),
             subtasks,
@@ -1065,20 +1132,12 @@ impl App for AppState {
                                 .display_task_result(unboxed_message);
                         }
                         BackendTaskSuccessResult::UpdatedThemePreference(new_theme) => {
-                            let detection_failed = self.theme.apply_new_preference(ctx, new_theme);
-                            if detection_failed {
-                                MessageBanner::set_global(
-                                    ctx,
-                                    "Could not detect your system theme. Using the previous theme for now — it will update automatically when detection succeeds.",
-                                    MessageType::Warning,
-                                );
-                            } else {
-                                MessageBanner::set_global(
-                                    ctx,
-                                    "Theme preference updated successfully",
-                                    MessageType::Success,
-                                );
-                            }
+                            self.theme.apply_new_preference(ctx, new_theme);
+                            MessageBanner::set_global(
+                                ctx,
+                                "Theme preference updated successfully",
+                                MessageType::Success,
+                            );
                             self.visible_screen_mut().display_message(
                                 "Theme preference updated successfully",
                                 MessageType::Success,

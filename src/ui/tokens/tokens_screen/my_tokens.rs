@@ -673,7 +673,6 @@ impl TokensScreen {
         let mut pos = 0;
         let mut action = AppAction::None;
         ui.spacing_mut().item_spacing.x = 5.0;
-        let dark_mode = ui.ctx().style().visuals.dark_mode;
 
         if range.contains(&pos) {
             if itb.available_actions.can_transfer {
@@ -689,14 +688,11 @@ impl TokensScreen {
                     }
                 }
             } else {
-                // Disabled, grayed-out Transfer button
-                ui.add_enabled(
-                    false,
-                    egui::Button::new(
-                        RichText::new("Transfer").color(DashColors::muted_color(dark_mode)),
-                    ),
-                )
-                .disabled_tooltip("Transfer not available");
+                // Disabled Transfer button. Use the shared helper so the disabled
+                // fill/text colors render correctly in dark mode and the label is
+                // centered (avoids egui's add_enabled(false) opacity multiplier).
+                ComponentStyles::add_primary_button_enabled(ui, false, "Transfer")
+                    .disabled_tooltip("Transfer not available");
             }
         }
 
@@ -954,11 +950,9 @@ impl TokensScreen {
                             ui.close_kind(egui::UiKind::Menu);
                         }
                     } else {
-                        // Disabled, grayed-out Purchase button
-                        ui.add_enabled(
-                                false,
-                                egui::Button::new(RichText::new("Purchase").color(DashColors::muted_color(dark_mode))),
-                            )
+                        // Disabled Purchase button (see Transfer above for the
+                        // rationale for using the shared helper).
+                        ComponentStyles::add_primary_button_enabled(ui, false, "Purchase")
                             .disabled_tooltip({
                                 if let Some(Some(pricing)) = self.token_pricing_data.get(&itb.token_id) {
                                     let min_price = get_min_token_price(pricing);

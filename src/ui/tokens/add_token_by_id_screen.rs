@@ -8,7 +8,7 @@ use dash_sdk::dpp::data_contract::associated_token::token_configuration_conventi
 use dash_sdk::dpp::platform_value::string_encoding::Encoding;
 use dash_sdk::platform::DataContract;
 use dash_sdk::platform::Identifier;
-use eframe::egui::{self, Context, Ui};
+use eframe::egui::{Context, Ui};
 
 use crate::ui::theme::ComponentStyles;
 
@@ -71,12 +71,12 @@ impl AddTokenByIdScreen {
         });
 
         ui.add_space(10.0);
-        if ui
-            .add_enabled(
-                !self.contract_or_token_id_input.is_empty(),
-                egui::Button::new("Search"),
-            )
-            .clicked()
+        if ComponentStyles::add_primary_button_enabled(
+            ui,
+            !self.contract_or_token_id_input.is_empty(),
+            "Search",
+        )
+        .clicked()
         {
             let now = Utc::now().timestamp() as u32;
             self.status = AddTokenStatus::Searching(now);

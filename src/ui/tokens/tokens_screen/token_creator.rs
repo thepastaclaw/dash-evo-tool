@@ -11,7 +11,7 @@ use dash_sdk::dpp::platform_value::string_encoding::Encoding;
 use dash_sdk::platform::Identifier;
 use eframe::epaint::Color32;
 use egui::{ComboBox, Context, Frame, Margin, RichText, TextEdit, Ui};
-use crate::ui::theme::DashColors;
+use crate::ui::theme::{ComponentStyles, DashColors};
 use crate::ui::ScreenType;
 use crate::app::{AppAction, BackendTasksExecutionMode};
 use crate::backend_task::BackendTask;
@@ -404,19 +404,13 @@ impl TokensScreen {
                                 && self.selected_token_preset.is_some();
 
                             ui.horizontal(|ui| {
-                                let button = egui::Button::new(
-                                    RichText::new("Create Token")
-                                        .color(egui::Color32::WHITE)
-                                        .strong(),
+                                if ComponentStyles::add_primary_button_enabled(
+                                    ui,
+                                    can_create,
+                                    "Create Token",
                                 )
-                                .fill(if can_create {
-                                    DashColors::DASH_BLUE
-                                } else {
-                                    egui::Color32::GRAY
-                                })
-                                .min_size(egui::vec2(150.0, 36.0));
-
-                                if ui.add_enabled(can_create, button).clicked() {
+                                .clicked()
+                                {
                                     // Auto-set plural name if empty (singular + "s")
                                     let singular = self.token_names_input[0].0.trim().to_string();
                                     if self.token_names_input[0].1.trim().is_empty() {

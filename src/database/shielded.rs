@@ -1,6 +1,48 @@
 use crate::database::Database;
 use crate::model::wallet::WalletSeedHash;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
+
+const COMMITMENT_TREE_TABLES: [&str; 4] = [
+    "commitment_tree_shards",
+    "commitment_tree_cap",
+    "commitment_tree_checkpoints",
+    "commitment_tree_checkpoint_marks_removed",
+];
+const COMMITMENT_TREE_META_TABLE: &str = "shielded_commitment_tree_meta";
+
+fn corrupted_blob_length_error(column: &'static str, len: usize) -> rusqlite::Error {
+    crate::database::CorruptedBlobError(format!(
+        "{column} blob has invalid length {len}, expected 32 bytes"
+    ))
+    .into()
+}
+
+fn blob_to_32_bytes(column: &'static str, bytes: Vec<u8>) -> rusqlite::Result<[u8; 32]> {
+    if bytes.len() != 32 {
+        return Err(corrupted_blob_length_error(column, bytes.len()));
+    }
+
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+fn commitment_tree_table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |row| row.get::<_, i32>(0).map(|count| count > 0),
+    )
+}
+
+fn clear_commitment_tree_tables_on_connection(conn: &Connection) -> rusqlite::Result<()> {
+    for table in COMMITMENT_TREE_TABLES {
+        if commitment_tree_table_exists(conn, table)? {
+            conn.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+    }
+    Ok(())
+}
 
 impl Database {
     /// Create shielded pool tables (v28 migration).
@@ -65,7 +107,7 @@ impl Database {
     ) -> rusqlite::Result<Vec<ShieldedNoteRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, note_data, position, cmx, nullifier, block_height, value
+            "SELECT id, note_data, position, cmx, nullifier, block_height, value, is_spent
              FROM shielded_notes
              WHERE wallet_seed_hash = ?1 AND network = ?2 AND is_spent = 0
              ORDER BY position ASC",
@@ -76,20 +118,11 @@ impl Database {
                 id: row.get(0)?,
                 note_data: row.get(1)?,
                 position: row.get::<_, i64>(2)? as u64,
-                cmx: {
-                    let bytes: Vec<u8> = row.get(3)?;
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&bytes);
-                    arr
-                },
-                nullifier: {
-                    let bytes: Vec<u8> = row.get(4)?;
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&bytes);
-                    arr
-                },
+                cmx: blob_to_32_bytes("cmx", row.get(3)?)?,
+                nullifier: blob_to_32_bytes("nullifier", row.get(4)?)?,
                 block_height: row.get::<_, i64>(5)? as u64,
                 value: row.get::<_, i64>(6)? as u64,
+                is_spent: row.get::<_, i64>(7)? != 0,
             })
         })?;
 
@@ -104,7 +137,7 @@ impl Database {
     ) -> rusqlite::Result<Vec<ShieldedNoteRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, note_data, position, cmx, nullifier, block_height, value
+            "SELECT id, note_data, position, cmx, nullifier, block_height, value, is_spent
              FROM shielded_notes
              WHERE wallet_seed_hash = ?1 AND network = ?2
              ORDER BY position ASC",
@@ -115,20 +148,11 @@ impl Database {
                 id: row.get(0)?,
                 note_data: row.get(1)?,
                 position: row.get::<_, i64>(2)? as u64,
-                cmx: {
-                    let bytes: Vec<u8> = row.get(3)?;
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&bytes);
-                    arr
-                },
-                nullifier: {
-                    let bytes: Vec<u8> = row.get(4)?;
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&bytes);
-                    arr
-                },
+                cmx: blob_to_32_bytes("cmx", row.get(3)?)?,
+                nullifier: blob_to_32_bytes("nullifier", row.get(4)?)?,
                 block_height: row.get::<_, i64>(5)? as u64,
                 value: row.get::<_, i64>(6)? as u64,
+                is_spent: row.get::<_, i64>(7)? != 0,
             })
         })?;
 
@@ -163,27 +187,99 @@ impl Database {
         )
     }
 
-    /// Clear all commitment tree data from the shared database.
+    fn ensure_commitment_tree_meta_table(&self, conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS shielded_commitment_tree_meta (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 0),
+                network TEXT
+            )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn get_commitment_tree_owner(&self, conn: &Connection) -> rusqlite::Result<Option<String>> {
+        self.ensure_commitment_tree_meta_table(conn)?;
+        conn.query_row(
+            &format!("SELECT network FROM {COMMITMENT_TREE_META_TABLE} WHERE singleton = 0"),
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    fn set_commitment_tree_owner(&self, conn: &Connection, network: &str) -> rusqlite::Result<()> {
+        self.ensure_commitment_tree_meta_table(conn)?;
+        conn.execute(
+            &format!(
+                "INSERT INTO {COMMITMENT_TREE_META_TABLE} (singleton, network)
+                 VALUES (0, ?1)
+                 ON CONFLICT(singleton) DO UPDATE SET network = excluded.network"
+            ),
+            [network],
+        )?;
+        Ok(())
+    }
+
+    fn clear_commitment_tree_owner(&self, conn: &Connection) -> rusqlite::Result<()> {
+        if commitment_tree_table_exists(conn, COMMITMENT_TREE_META_TABLE)? {
+            conn.execute(
+                &format!("DELETE FROM {COMMITMENT_TREE_META_TABLE} WHERE singleton = 0"),
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn commitment_tree_has_rows(&self, conn: &Connection) -> rusqlite::Result<bool> {
+        for table in COMMITMENT_TREE_TABLES {
+            if !commitment_tree_table_exists(conn, table)? {
+                continue;
+            }
+            let has_rows = conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)"),
+                [],
+                |row| row.get::<_, i64>(0).map(|exists| exists != 0),
+            )?;
+            if has_rows {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Ensure the shared commitment tree is bound to the requested network.
+    ///
+    /// The upstream SQLite store is global, so when switching networks we must
+    /// clear stale rows before the tree is reused under a different network.
+    pub fn prepare_commitment_tree_tables(&self, network: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let owner = self.get_commitment_tree_owner(&conn)?;
+        if owner.as_deref() == Some(network) {
+            return Ok(());
+        }
+
+        if self.commitment_tree_has_rows(&conn)? {
+            clear_commitment_tree_tables_on_connection(&conn)?;
+        }
+
+        self.set_commitment_tree_owner(&conn, network)
+    }
+
+    /// Clear commitment tree data only when the shared tree currently belongs
+    /// to the requested network.
     ///
     /// Handles fresh installs where grovedb creates these tables lazily —
     /// each DELETE is skipped if the table does not exist yet.
-    pub fn clear_commitment_tree_tables(&self) -> rusqlite::Result<()> {
+    pub fn clear_commitment_tree_tables(&self, network: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
-        for table in &[
-            "commitment_tree_shards",
-            "commitment_tree_cap",
-            "commitment_tree_checkpoints",
-            "commitment_tree_checkpoint_marks_removed",
-        ] {
-            let exists: bool = conn.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                [table],
-                |row| row.get::<_, i32>(0).map(|c| c > 0),
-            )?;
-            if exists {
-                conn.execute(&format!("DELETE FROM {table}"), [])?;
-            }
+
+        if self.get_commitment_tree_owner(&conn)?.as_deref() != Some(network) {
+            return Ok(());
         }
+
+        clear_commitment_tree_tables_on_connection(&conn)?;
+        self.clear_commitment_tree_owner(&conn)?;
         Ok(())
     }
 
@@ -290,14 +386,12 @@ impl Database {
         network: &str,
     ) -> rusqlite::Result<u64> {
         let conn = self.conn.lock().unwrap();
-        let result: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(value), 0) FROM shielded_notes
+        let result: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(value), 0) FROM shielded_notes
              WHERE wallet_seed_hash = ?1 AND network = ?2 AND is_spent = 0",
-                params![wallet_seed_hash.as_slice(), network],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
+            params![wallet_seed_hash.as_slice(), network],
+            |row| row.get(0),
+        )?;
         Ok(result as u64)
     }
 }
@@ -322,4 +416,5 @@ pub struct ShieldedNoteRow {
     pub nullifier: [u8; 32],
     pub block_height: u64,
     pub value: u64,
+    pub is_spent: bool,
 }

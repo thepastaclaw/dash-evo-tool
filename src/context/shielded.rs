@@ -243,6 +243,12 @@ impl AppContext {
 
         let network_str = self.network.to_string();
 
+        self.db
+            .prepare_commitment_tree_tables(&network_str)
+            .map_err(|e| TaskError::ShieldedTreeUpdateFailed {
+                detail: e.to_string(),
+            })?;
+
         let commitment_tree = ClientPersistentCommitmentTree::open_on_shared_connection(
             self.db.shared_connection(),
             100,
@@ -261,7 +267,7 @@ impl AppContext {
         let (last_nullifier_sync_height, last_nullifier_sync_timestamp) = self
             .db
             .get_nullifier_sync_info(&seed_hash, &network_str)
-            .unwrap_or((0, 0));
+            .map_err(|detail| TaskError::ShieldedNullifierSyncFailed { detail })?;
 
         let mut state = ShieldedWalletState {
             keys,
@@ -289,42 +295,55 @@ impl AppContext {
                     cmx: row.cmx,
                     nullifier,
                     block_height: row.block_height,
-                    is_spent: false,
+                    is_spent: row.is_spent,
                     value: row.value,
                 });
             }
         }
         state.recalculate_balance();
 
-        // Safety net: if the tree has been synced but no notes exist at all
-        // (spent or unspent), force a full resync from index 0. This handles
-        // the case where change notes from prior operations were only in memory
-        // and the app restarted before the next sync persisted them.
-        // We check ALL notes (including spent) to avoid a false positive when
-        // the user legitimately spent everything.
-        if state.last_synced_index > 0 && state.notes.is_empty() {
-            let all_notes = self.db.get_all_shielded_notes(&seed_hash, &network_str)?;
-            if all_notes.is_empty() {
-                tracing::warn!(
-                    "Shielded init: wallet {} tree synced to index {} but no notes in DB — forcing full resync",
-                    hex::encode(seed_hash.as_slice()),
-                    state.last_synced_index,
-                );
-                self.db.clear_commitment_tree_tables().map_err(|e| {
-                    TaskError::ShieldedTreeUpdateFailed {
-                        detail: e.to_string(),
-                    }
-                })?;
-                let fresh_tree = ClientPersistentCommitmentTree::open_on_shared_connection(
-                    self.db.shared_connection(),
-                    100,
-                )
+        let all_notes = self.db.get_all_shielded_notes(&seed_hash, &network_str)?;
+        let persisted_unspent_count = all_notes.iter().filter(|row| !row.is_spent).count();
+        let needs_full_resync = all_notes.is_empty() && state.last_synced_index > 0
+            || persisted_unspent_count != state.notes.len()
+            || persisted_unspent_count > 0 && state.last_synced_index == 0;
+
+        if needs_full_resync {
+            tracing::warn!(
+                "Shielded init: wallet {} tree/note mismatch detected (tree_index={}, persisted_notes={}, persisted_unspent={}, loaded_unspent={}) — forcing full resync",
+                hex::encode(seed_hash.as_slice()),
+                state.last_synced_index,
+                all_notes.len(),
+                persisted_unspent_count,
+                state.notes.len(),
+            );
+            self.db.delete_shielded_notes(&seed_hash, &network_str)?;
+            self.db
+                .set_nullifier_sync_info(&seed_hash, &network_str, 0, 0)
+                .map_err(|detail| TaskError::ShieldedNullifierSyncFailed { detail })?;
+            self.db
+                .clear_commitment_tree_tables(&network_str)
                 .map_err(|e| TaskError::ShieldedTreeUpdateFailed {
                     detail: e.to_string(),
                 })?;
-                state.commitment_tree = std::sync::Mutex::new(fresh_tree);
-                state.last_synced_index = 0;
-            }
+            self.db
+                .prepare_commitment_tree_tables(&network_str)
+                .map_err(|e| TaskError::ShieldedTreeUpdateFailed {
+                    detail: e.to_string(),
+                })?;
+            let fresh_tree = ClientPersistentCommitmentTree::open_on_shared_connection(
+                self.db.shared_connection(),
+                100,
+            )
+            .map_err(|e| TaskError::ShieldedTreeUpdateFailed {
+                detail: e.to_string(),
+            })?;
+            state.notes.clear();
+            state.recalculate_balance();
+            state.commitment_tree = std::sync::Mutex::new(fresh_tree);
+            state.last_synced_index = 0;
+            state.last_nullifier_sync_height = 0;
+            state.last_nullifier_sync_timestamp = 0;
         }
 
         let balance = state.shielded_balance;

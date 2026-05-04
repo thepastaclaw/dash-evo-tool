@@ -188,13 +188,18 @@ impl Database {
                 rusqlite::params![&network_str],
             )?;
 
+            tx.execute(
+                "DELETE FROM shielded_wallet_meta WHERE network = ?1",
+                rusqlite::params![&network_str],
+            )?;
+
             tx.commit()?;
         } // conn lock released here
 
         // Commitment tree tables are optional (created lazily by grovedb).
         // Log and continue if clearing them fails — the main network data
         // has already been committed above.
-        if let Err(e) = self.clear_commitment_tree_tables() {
+        if let Err(e) = self.clear_commitment_tree_tables(&network_str) {
             tracing::warn!("Failed to clear commitment tree tables: {e}");
         }
 

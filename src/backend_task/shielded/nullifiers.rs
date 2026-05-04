@@ -4,6 +4,7 @@ use crate::model::wallet::WalletSeedHash;
 use crate::model::wallet::shielded::ShieldedWalletState;
 use dash_sdk::dpp::dashcore::Network;
 use dash_sdk::platform::shielded::nullifier_sync::{NullifierSyncCheckpoint, NullifierSyncConfig};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Check which unspent notes have been spent on-chain using the SDK's
@@ -52,29 +53,42 @@ pub async fn check_nullifiers(
             detail: e.to_string(),
         })?;
 
-    // Mark found (spent) nullifiers
-    let mut spent_count = 0u32;
+    let mut matched_note_indexes = BTreeSet::new();
     for nf_bytes in &result.found {
-        for note in &mut shielded_state.notes {
-            if !note.is_spent && note.nullifier.to_bytes() == *nf_bytes {
-                note.is_spent = true;
-                spent_count += 1;
-                let _ = app_context
-                    .db
-                    .mark_shielded_note_spent(seed_hash, nf_bytes, &network_str);
-            }
+        if let Some((idx, _)) = shielded_state
+            .notes
+            .iter()
+            .enumerate()
+            .find(|(_, note)| !note.is_spent && note.nullifier.to_bytes() == *nf_bytes)
+        {
+            matched_note_indexes.insert(idx);
         }
     }
 
-    // Persist sync height and timestamp
+    for nf_bytes in &result.found {
+        app_context
+            .db
+            .mark_shielded_note_spent(seed_hash, nf_bytes, &network_str)?;
+    }
+
+    app_context
+        .db
+        .set_nullifier_sync_info(
+            seed_hash,
+            &network_str,
+            result.new_sync_height,
+            result.new_sync_timestamp,
+        )
+        .map_err(|detail| TaskError::ShieldedNullifierSyncFailed { detail })?;
+
+    let spent_count = matched_note_indexes.len() as u32;
+    for idx in matched_note_indexes {
+        if let Some(note) = shielded_state.notes.get_mut(idx) {
+            note.is_spent = true;
+        }
+    }
     shielded_state.last_nullifier_sync_height = result.new_sync_height;
     shielded_state.last_nullifier_sync_timestamp = result.new_sync_timestamp;
-    let _ = app_context.db.set_nullifier_sync_info(
-        seed_hash,
-        &network_str,
-        result.new_sync_height,
-        result.new_sync_timestamp,
-    );
 
     if spent_count > 0 {
         shielded_state.recalculate_balance();

@@ -559,7 +559,10 @@ impl ShieldedTabView {
                             .app_context
                             .db
                             .delete_shielded_notes(&self.seed_hash, &network_str);
-                        let _ = self.app_context.db.clear_commitment_tree_tables();
+                        let _ = self
+                            .app_context
+                            .db
+                            .clear_commitment_tree_tables(&network_str);
 
                         self.shielded_balance = 0;
                         self.tree_synced = false;

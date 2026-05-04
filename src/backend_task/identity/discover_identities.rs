@@ -1,3 +1,4 @@
+use crate::backend_task::error::TaskError;
 use crate::context::AppContext;
 use crate::model::qualified_identity::DPNSNameInfo;
 use crate::model::wallet::Wallet;
@@ -12,14 +13,17 @@ impl AppContext {
         self: &Arc<Self>,
         wallet: &Arc<RwLock<Wallet>>,
         max_identity_index: u32,
-    ) -> Result<(), String> {
+    ) -> Result<(), TaskError> {
         use dash_sdk::platform::Fetch;
         use dash_sdk::platform::types::identity::NonUniquePublicKeyHashQuery;
 
         const AUTH_KEY_LOOKUP_WINDOW: u32 = 12;
 
         let sdk = self.sdk.load().as_ref().clone();
-        let seed_hash = wallet.read().map_err(|e| e.to_string())?.seed_hash();
+        let seed_hash = wallet
+            .read()
+            .map_err(|_| TaskError::LockPoisoned { resource: "wallet" })?
+            .seed_hash();
 
         tracing::info!(
             seed = %hex::encode(seed_hash),
@@ -36,7 +40,9 @@ impl AppContext {
 
             for key_index in 0..AUTH_KEY_LOOKUP_WINDOW {
                 let public_key = {
-                    let wallet_guard = wallet.read().map_err(|e| e.to_string())?;
+                    let wallet_guard = wallet
+                        .read()
+                        .map_err(|_| TaskError::LockPoisoned { resource: "wallet" })?;
                     match wallet_guard.identity_authentication_ecdsa_public_key(
                         self.network,
                         identity_index,
@@ -92,7 +98,9 @@ impl AppContext {
 
                 // Check if we already have this identity stored
                 let already_exists = {
-                    let wallets = self.wallets.read().map_err(|e| e.to_string())?;
+                    let wallets = self.wallets.read().map_err(|_| TaskError::LockPoisoned {
+                        resource: "wallets",
+                    })?;
                     let existing = self.db.get_identity_by_id(&identity_id, self, &wallets);
                     existing.is_ok() && existing.unwrap().is_some()
                 };
@@ -163,7 +171,7 @@ impl AppContext {
         identity: dash_sdk::platform::Identity,
         wallet: &Arc<RwLock<Wallet>>,
         identity_index: u32,
-    ) -> Result<crate::model::qualified_identity::QualifiedIdentity, String> {
+    ) -> Result<crate::model::qualified_identity::QualifiedIdentity, TaskError> {
         use crate::model::qualified_identity::encrypted_key_storage::{
             PrivateKeyData, WalletDerivationPath,
         };
@@ -176,7 +184,10 @@ impl AppContext {
         use dash_sdk::dpp::identity::identity_public_key::accessors::v0::IdentityPublicKeyGettersV0;
         use dash_sdk::dpp::key_wallet::bip32::{DerivationPath, KeyDerivationType};
 
-        let seed_hash = wallet.read().map_err(|e| e.to_string())?.seed_hash();
+        let seed_hash = wallet
+            .read()
+            .map_err(|_| TaskError::LockPoisoned { resource: "wallet" })?
+            .seed_hash();
 
         // Get the highest key ID in the identity to know how many keys to derive
         let highest_key_id = identity.public_keys().keys().max().copied().unwrap_or(0);
@@ -189,7 +200,9 @@ impl AppContext {
             std::collections::BTreeMap::new();
 
         {
-            let wallet_guard = wallet.read().map_err(|e| e.to_string())?;
+            let wallet_guard = wallet
+                .read()
+                .map_err(|_| TaskError::LockPoisoned { resource: "wallet" })?;
             for key_index in 0..=derive_up_to {
                 if let Ok(public_key) = wallet_guard.identity_authentication_ecdsa_public_key(
                     self.network,

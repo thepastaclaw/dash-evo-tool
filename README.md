@@ -105,6 +105,7 @@ When the application runs for the first time, it creates an application director
 
 | Variable | Values | Default | Description |
 | - | - | - | - |
+| `DEVELOPER_MODE` | `true` / `false` | `false` | Global Expert/developer mode toggle. When `true`, exposes advanced UI (Dash Core RPC backend, Devnet/Local networks, developer tools, advanced signing, experimental wallet/token/shielded options) and disables UI animations. See [Expert Mode](docs/expert-mode.md). |
 | `DASH_EVO_TOOL_ACCESSIBILITY` | `1` / unset | unset | Force-enable accessibility support. Activates AccessKit eagerly so the UI element tree is populated every frame and (on macOS) forces the platform accessibility adapter to initialize. Without this flag, accessibility still works normally — VoiceOver and other assistive technologies trigger AccessKit's lazy activation automatically. This flag is needed for tools that query the accessibility tree without registering as assistive technology clients (e.g. AXUIElement-based automation like Peekaboo). |
 
 ## Contributing

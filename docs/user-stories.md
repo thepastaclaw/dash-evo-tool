@@ -1026,6 +1026,21 @@ As an everyday user, I want to install and use Dash Evo Tool without having to r
 - The user sees sync progress and status clearly; the default everyday-user UI avoids mentions of SPV, RPC, or nodes.
 - Technical/protocol terminology may appear in Expert mode or advanced settings, where Dash Core RPC remains available as an opt-in for users who do run a local node.
 
+### NET-016: Unverified read-only Platform queries [Deferred]
+**Persona:** Jordan
+
+As a developer, I might want a clearly labeled trusted/unverified read-only mode
+for debugging against DAPI when local chain context is unavailable.
+
+- Not a silent fallback: users must explicitly opt in from Expert/Developer mode
+  and see a persistent warning.
+- Read-only only; never available for state transitions, sends, top-ups,
+  withdrawals, token actions, or signing/spending decisions.
+- Requires explicit SDK support for unproved decoding per query type. DET must
+  not fake quorum keys or swallow proof errors globally.
+- Current supported no-Core path remains SPV mode with proof verification intact.
+  See [Proof verification trust model](proof-verification-trust-model.md).
+
 ---
 
 ## Programmatic Access (MCP)

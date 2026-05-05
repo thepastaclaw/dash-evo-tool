@@ -96,6 +96,12 @@ All wallet-facing tools wait for SPV to fully sync before executing. This includ
 
 Only metadata tools that make no network calls (`core_wallets_list`, `network_info`, `tool_describe`) skip the SPV gate.
 
+DET does not provide a general unverified DAPI mode. Platform responses are
+verified through the SDK context provider; in SPV mode the quorum data comes
+from the built-in SPV client instead of a local Dash Core RPC node. See
+[Proof verification trust model](proof-verification-trust-model.md) for the
+rationale and constraints.
+
 ## CLI interface (det-cli)
 
 `det-cli` is the command-line interface for interacting with MCP tools. It can operate in two modes:

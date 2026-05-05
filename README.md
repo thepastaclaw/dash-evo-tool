@@ -123,3 +123,8 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 ## Security Note
 
 Keep your private keys and identity information secure. Do not share them with untrusted parties or applications.
+
+DET verifies Platform responses by default. If you need to run without a local
+Dash Core node, use the built-in SPV backend rather than disabling proof
+verification. See [Proof verification trust model](docs/proof-verification-trust-model.md)
+for details.

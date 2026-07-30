@@ -94,22 +94,85 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **"Max" now matches what your Core wallet can actually send**: pressing
+- **"Max" now uses the wallet builder for Core-funded asset locks**: pressing
   "Max" when shielding DASH, funding a Platform address through the Simple
   builder-driven form, sending directly to an identity, or funding an identity
   (creating or topping up, from your wallet balance or a received deposit)
   could suggest an amount larger than the wallet could actually send, so the
   transaction was rejected no matter how you adjusted it. Max and the amount
-  check now ask the wallet directly what it can send instead of estimating from
-  an on-screen balance, so the two stay in agreement, and both reserve room for
-  the fee. The Advanced manual-input Platform-address flow remains governed by
-  the Core inputs the user selects rather than this builder ceiling. Funding
-  from a received deposit is also now capped by what actually arrived at that
-  deposit address, never by unrelated funds elsewhere in the wallet. While the
-  check is running, the amount field shows "Checking the available amount…";
-  if it fails, "The available amount could not be checked." appears with a
-  "Retry available amount check" button, and you can still switch to a
-  different funding method at any point.
+  check now use a reservation-aware, builder-derived point-in-time ceiling
+  instead of estimating from an on-screen balance. This reserves room for the
+  fee and reduces rejected Max attempts, but it is not an absolute guarantee
+  that funds remain sendable if wallet state changes before you submit. The
+  Advanced manual-input Platform-address flow remains governed by the Core
+  inputs the user selects rather than this builder ceiling. Funding from a
+  received deposit is also now capped by what actually arrived at that deposit
+  address, never by unrelated funds elsewhere in the wallet. While the check is
+  running, the amount field shows "Checking the available amount…"; if it
+  fails, "The available amount could not be checked." appears with a "Retry
+  available amount check" button, and you can still switch to a different
+  funding method at any point.
+
+- **A saved voting key can now actually sign**: a voting key held on an
+  identity's own record — rather than on a separate voting identity — was saved
+  and shown as being on this device, but nothing could use it. Signing looked for
+  it in the wrong place, so voting with it failed and the key's page reported it
+  missing, on the screen whose job is to answer that question. Dash Evo Tool now
+  finds a key by matching it against the key itself, wherever it is filed, so it
+  is found whichever version of the app saved it and no key material has to be
+  moved to fix this. This also means a key is no longer confused with a different
+  key that happens to share its number, which a masternode has whenever its
+  voting identity numbers a key the same way as its main identity: removing one
+  key could remove the other's private half, and a key could be reported as
+  saved on the strength of an unrelated key being present.
+
+- **An identity's keys are reachable again**: the keys list under an identity's
+  Settings → Advanced now opens each key's own page, so keys can be inspected
+  and restored — and, once a key is on this device, signed with or
+  password-protected — without changing the interface mode and without starting
+  a payment. Previously that list was a read-only table with no way onward, and
+  every route to a key's page ran through an action screen — sending,
+  withdrawing, a token operation — each of which offers it only when the
+  identity already holds a key of the kind that action needs. So an identity
+  missing its keys, the one case where this matters most, could not get to them
+  at all. The offer to restore keys left behind by an earlier version now also
+  appears on the keys list itself, above the keys, rather than only inside a
+  key's page. Each key is named by its role and states whether it is saved on
+  this device. Keys are named for the identity they belong to: a user identity's
+  keys are described in plain language rather than in masternode registration
+  terms, which previously appeared on every identity. Leaving a key returns to
+  the list with both its keys and the restore offer brought up to date, so a
+  restore made from a key's page is reflected immediately instead of being
+  offered again.
+
+  A key opened from a masternode's page keeps its name too. A voting key is the
+  node's voting key however it is recorded, and its own page now says so instead
+  of describing it as another kind of key, which also means the page no longer
+  reports such a key as missing while the list it was opened from shows it as
+  saved on this device.
+
+  One known limitation, for a voting key stored on the identity itself rather
+  than on a separate voting identity: the keys list and the key's page now agree
+  on whether such a key is saved here, but saving or removing one by hand can
+  affect a voting key of the same number on a linked voting identity, and
+  removing it may leave the original in place. So until then, after saving or
+  removing a voting key on an identity like that, open the keys list and check
+  that each key still reads as you expect, and re-enter any key that should be
+  saved but no longer is. This will be closed by the in-progress key-placement
+  resolution fix.
+
+- **A key's page now catches up on changes made while it was open**: previously,
+  if something else updated your identity while a key's page was open — most
+  relevantly, a restore that finished from a different screen — the next key
+  edit made on that page could silently overwrite the change. The page now
+  picks up such changes as they arrive.
+
+- **Key role names are complete, consistent phrases everywhere**: a key's role
+  (owner, voting, payout, and so on) now reads the same complete phrase across
+  the keys list, a masternode's page, and the key's own page, instead of a
+  partly-assembled label that could vary by screen. The on-chain purpose value
+  itself remains available as its own line in Expert view for anyone who wants
+  it verbatim.
 
 - **Wallet rename consistency**: renaming a wallet no longer overwrites other
   saved wallet details when metadata cannot be read. Overlapping renames and

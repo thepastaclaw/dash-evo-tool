@@ -71,6 +71,7 @@ impl WalletBackend {
                 let asset_lock_signer =
                     DetSigner::from_held(session.plaintext(), self.inner.network);
                 let wallet = self.resolve_wallet(seed_hash).await?;
+                self.inner.snapshots.invalidate_asset_lock_inputs(seed_hash);
                 wallet
                     .identity()
                     .register_identity_with_funding(
@@ -192,6 +193,7 @@ impl WalletBackend {
                 let asset_lock_signer =
                     DetSigner::from_held(session.plaintext(), self.inner.network);
                 let wallet = self.resolve_wallet(seed_hash).await?;
+                self.inner.snapshots.invalidate_asset_lock_inputs(seed_hash);
                 wallet
                     .identity()
                     .top_up_identity_with_funding(

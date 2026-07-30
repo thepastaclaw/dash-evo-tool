@@ -5,6 +5,7 @@ use crate::backend_task::wallet::WalletTask;
 use crate::model::wallet::WalletSeedHash;
 use crate::wallet_backend::AssetLockInputState;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const LOADING_VALIDATION_MESSAGE: &str =
@@ -12,6 +13,7 @@ const LOADING_VALIDATION_MESSAGE: &str =
 const FAILED_VALIDATION_MESSAGE: &str =
     "The available amount could not be checked. Use Retry and try again.";
 const ASSET_LOCK_REQUEST_DEADLINE: Duration = Duration::from_secs(15);
+static NEXT_ASSET_LOCK_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 struct RequestKey {
@@ -38,7 +40,19 @@ struct InFlight {
 
 struct LoadedQuote {
     observed_inputs: AssetLockInputState,
+    observed_revision: u64,
     amount_duffs: u64,
+}
+
+pub struct ObservedAssetLockInputs {
+    pub inputs: AssetLockInputState,
+    pub revision: u64,
+}
+
+impl ObservedAssetLockInputs {
+    pub fn new(inputs: AssetLockInputState, revision: u64) -> Self {
+        Self { inputs, revision }
+    }
 }
 
 struct FailedRequest {
@@ -59,7 +73,6 @@ struct FetchState {
 #[derive(Default)]
 pub struct AssetLockBalanceCache {
     states: BTreeMap<WalletSeedHash, FetchState>,
-    next_request_id: u64,
 }
 
 impl AssetLockBalanceCache {
@@ -140,10 +153,9 @@ impl AssetLockBalanceCache {
             .in_flight
             .as_ref()
             .is_some_and(|in_flight| in_flight.key.matches_composition(&inputs, utxo_revision))
-            || state
-                .loaded
-                .as_ref()
-                .is_some_and(|loaded| loaded.observed_inputs == inputs)
+            || state.loaded.as_ref().is_some_and(|loaded| {
+                loaded.observed_inputs == inputs && loaded.observed_revision == utxo_revision
+            })
             || state.failed.as_ref().is_some_and(|failed| {
                 failed
                     .key
@@ -152,8 +164,11 @@ impl AssetLockBalanceCache {
         {
             return None;
         }
-        let request_id = self.next_request_id.checked_add(1)?;
-        self.next_request_id = request_id;
+        let request_id = NEXT_ASSET_LOCK_REQUEST_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .ok()?;
         state.request_key = RequestKey {
             generation: snapshot_generation,
             inputs: inputs.clone(),
@@ -183,7 +198,7 @@ impl AssetLockBalanceCache {
         snapshot_generation: u64,
         request_id: u64,
         amount_duffs: u64,
-        observed_inputs: AssetLockInputState,
+        observed: ObservedAssetLockInputs,
         is_partial: bool,
     ) {
         let Some(state) = self.states.get_mut(&seed_hash) else {
@@ -200,7 +215,8 @@ impl AssetLockBalanceCache {
                 in_flight_key.revision,
             ) {
                 state.loaded = Some(LoadedQuote {
-                    observed_inputs,
+                    observed_inputs: observed.inputs,
+                    observed_revision: observed.revision,
                     amount_duffs,
                 });
                 state.failed = None;
@@ -247,12 +263,15 @@ impl AssetLockBalanceCache {
         &self,
         seed_hash: &WalletSeedHash,
         inputs: &AssetLockInputState,
+        revision: u64,
     ) -> Option<u64> {
         self.states.get(seed_hash).and_then(|state| {
             state
                 .loaded
                 .as_ref()
-                .filter(|loaded| loaded.observed_inputs == *inputs)
+                .filter(|loaded| {
+                    loaded.observed_inputs == *inputs && loaded.observed_revision == revision
+                })
                 .map(|loaded| loaded.amount_duffs)
         })
     }
@@ -301,7 +320,7 @@ impl AssetLockBalanceCache {
 
 #[cfg(test)]
 mod tests {
-    use super::AssetLockBalanceCache;
+    use super::{AssetLockBalanceCache, ObservedAssetLockInputs};
     use crate::backend_task::BackendTask;
     use crate::backend_task::wallet::WalletTask;
     use crate::wallet_backend::AssetLockInputState;
@@ -331,7 +350,10 @@ mod tests {
             snapshot_generation,
             request_id,
             amount_duffs,
-            snapshot_inputs(final_funds_duffs, utxo_revision),
+            ObservedAssetLockInputs::new(
+                snapshot_inputs(final_funds_duffs, utxo_revision),
+                utxo_revision,
+            ),
             false,
         );
     }
@@ -553,7 +575,7 @@ mod tests {
 
         store(&mut cache, seed_hash, 7, request_t1, 900, 1_000, 1);
         assert_eq!(
-            cache.get_current(&seed_hash, &snapshot_inputs(1_500, 2)),
+            cache.get_current(&seed_hash, &snapshot_inputs(1_500, 2), 2),
             None,
             "T1's stale reply must not be tagged as T2's current quote"
         );
@@ -564,7 +586,7 @@ mod tests {
         );
         store(&mut cache, seed_hash, 7, request_t2, 1_400, 1_500, 2);
         assert_eq!(
-            cache.get_current(&seed_hash, &snapshot_inputs(1_500, 2)),
+            cache.get_current(&seed_hash, &snapshot_inputs(1_500, 2), 2),
             Some(1_400)
         );
     }
@@ -585,14 +607,14 @@ mod tests {
             "stale-while-revalidate must keep the prior quote displayable"
         );
         assert_eq!(
-            cache.get_current(&seed_hash, &snapshot_inputs(1_000, 2)),
+            cache.get_current(&seed_hash, &snapshot_inputs(1_000, 2), 2),
             None,
             "validation must not use the stale higher quote for the new composition"
         );
 
         store(&mut cache, seed_hash, 8, current_request, 700, 1_000, 2);
         assert_eq!(
-            cache.get_current(&seed_hash, &snapshot_inputs(1_000, 2)),
+            cache.get_current(&seed_hash, &snapshot_inputs(1_000, 2), 2),
             Some(700)
         );
     }
@@ -613,14 +635,95 @@ mod tests {
                 _ => None,
             })
             .expect("asset-lock maximum request");
-        cache.store(seed_hash, 7, request_id, 800, observed.clone(), false);
+        cache.store(
+            seed_hash,
+            7,
+            request_id,
+            800,
+            ObservedAssetLockInputs::new(observed.clone(), 2),
+            false,
+        );
 
         assert_eq!(
-            cache.get_current(&seed_hash, &dispatched),
+            cache.get_current(&seed_hash, &dispatched, 1),
             None,
             "dispatch-time bookkeeping must not validate a quote measured against other inputs"
         );
-        assert_eq!(cache.get_current(&seed_hash, &observed), Some(800));
+        assert_eq!(cache.get_current(&seed_hash, &observed, 2), Some(800));
+    }
+
+    #[test]
+    fn asset_lock_balance_cache_request_ids_are_unique_across_screen_caches() {
+        let seed_hash = [0x38; 32];
+        let mut first_screen = AssetLockBalanceCache::default();
+        let mut second_screen = AssetLockBalanceCache::default();
+        let inputs = snapshot_inputs(1_000, 1);
+
+        let first_request = asset_lock_request_id(
+            first_screen
+                .ensure_requested(seed_hash, 1, inputs.clone(), 1)
+                .expect("first screen request"),
+        );
+        let second_request = asset_lock_request_id(
+            second_screen
+                .ensure_requested(seed_hash, 1, inputs.clone(), 1)
+                .expect("second screen request"),
+        );
+
+        assert_ne!(
+            first_request, second_request,
+            "a reconstructed screen must not reuse another screen's in-flight request ID"
+        );
+        second_screen.store(
+            seed_hash,
+            1,
+            first_request,
+            900,
+            ObservedAssetLockInputs::new(inputs.clone(), 1),
+            false,
+        );
+        assert_eq!(
+            second_screen.get_current(&seed_hash, &inputs, 1),
+            None,
+            "a late reply from the previous screen must not satisfy the new screen"
+        );
+        second_screen.store(
+            seed_hash,
+            1,
+            second_request,
+            800,
+            ObservedAssetLockInputs::new(inputs.clone(), 1),
+            false,
+        );
+        assert_eq!(second_screen.get_current(&seed_hash, &inputs, 1), Some(800));
+    }
+
+    #[test]
+    fn asset_lock_balance_cache_rejects_quote_after_validation_revision_changes() {
+        let seed_hash = [0x39; 32];
+        let mut cache = AssetLockBalanceCache::default();
+        let inputs = snapshot_inputs(1_000, 1);
+
+        let request_id = request(&mut cache, seed_hash, 1, 1_000, 1);
+        cache.store(
+            seed_hash,
+            1,
+            request_id,
+            900,
+            ObservedAssetLockInputs::new(inputs.clone(), 1),
+            false,
+        );
+
+        assert_eq!(cache.get_current(&seed_hash, &inputs, 1), Some(900));
+        assert_eq!(
+            cache.get_current(&seed_hash, &inputs, 2),
+            None,
+            "a reservation invalidation must make an old same-composition quote non-authoritative"
+        );
+        assert!(
+            cache.ensure_requested(seed_hash, 2, inputs, 2).is_some(),
+            "a revision-only validation invalidation must dispatch a fresh quote"
+        );
     }
 
     #[test]

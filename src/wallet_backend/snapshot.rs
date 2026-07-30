@@ -35,25 +35,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use arc_swap::ArcSwap;
-use dash_sdk::dpp::dashcore::blockdata::transaction::special_transaction::TransactionPayload;
-use dash_sdk::dpp::dashcore::blockdata::transaction::special_transaction::asset_lock::AssetLockPayload;
 use dash_sdk::dpp::dashcore::{Address, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
 #[cfg(test)]
 use dash_sdk::dpp::key_wallet::Utxo;
-use dash_sdk::dpp::key_wallet::account::Account;
 use dash_sdk::dpp::key_wallet::bip32::DerivationPath;
-use dash_sdk::dpp::key_wallet::managed_account::ManagedCoreFundsAccount;
 use dash_sdk::dpp::key_wallet::managed_account::transaction_record::{
     OutputRole, TransactionRecord,
 };
 use dash_sdk::dpp::key_wallet::transaction_checking::TransactionContext;
-use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::coin_selection::{
-    SelectionError, SelectionStrategy,
-};
-use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::fee::FeeRate;
-use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::transaction_builder::{
-    BuilderError, TransactionBuilder,
-};
 use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
 use platform_wallet::PlatformWallet;
 
@@ -64,9 +53,6 @@ use crate::model::wallet::{TransactionStatus, WalletSeedHash, WalletTransaction}
 /// Upstream `WalletId` (`SHA256(root_xpub || root_chain_code)`), distinct from
 /// DET's `WalletSeedHash`. Mirrors the alias in [`super`].
 type WalletId = [u8; 32];
-
-const ASSET_LOCK_INPUT_OBSERVATION_BATCH_SIZE: usize = 500;
-static ASSET_LOCK_INPUT_OBSERVATION_LOCK: Mutex<()> = Mutex::new(());
 
 /// Exact final, unreserved input composition observed by an asset-lock builder.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -131,10 +117,6 @@ pub struct DetUtxo {
 pub struct WalletSnapshot {
     /// Monotonic per-wallet publish counter used to invalidate derived UI caches.
     pub(super) generation: u64,
-    /// Exact final, unreserved input composition seen by the live builder.
-    pub(super) asset_lock_inputs: AssetLockInputState,
-    /// Revision advanced whenever that exact input composition changes.
-    pub(super) asset_lock_input_revision: u64,
     pub balance: DetWalletBalance,
     pub transactions: Vec<WalletTransaction>,
     pub utxos: Vec<DetUtxo>,
@@ -206,7 +188,7 @@ impl TransactionHistoryStatus {
 /// argument limit and makes the carry-forward-on-contention path explicit.
 struct SnapshotState {
     balance: DetWalletBalance,
-    asset_lock_inputs: AssetLockInputState,
+    asset_lock_inputs: Option<AssetLockInputState>,
     utxos: Vec<DetUtxo>,
     address_balances: BTreeMap<Address, u64>,
     monitored_receive_addresses: Vec<String>,
@@ -233,82 +215,14 @@ fn asset_lock_final_funds_duffs<'a>(
     asset_lock_final_inputs(utxos, current_height).final_funds_duffs
 }
 
-fn observe_asset_lock_inputs_locked(
-    managed_account: &ManagedCoreFundsAccount,
-    account: &Account,
+fn asset_lock_final_unreserved_inputs<'a>(
+    utxos: impl IntoIterator<Item = &'a dash_sdk::dpp::key_wallet::Utxo>,
     current_height: u32,
-) -> Result<AssetLockInputState, BuilderError> {
-    let candidates: Vec<_> = managed_account
-        .utxos
-        .values()
-        .filter(|utxo| {
-            (utxo.is_confirmed || utxo.is_instantlocked) && utxo.is_spendable(current_height)
-        })
-        .cloned()
-        .collect();
-    let values: BTreeMap<_, _> = candidates
-        .iter()
-        .map(|utxo| (utxo.outpoint, utxo.value()))
-        .collect();
-    let mut observed = Vec::with_capacity(candidates.len());
-
-    for batch in candidates.chunks(ASSET_LOCK_INPUT_OBSERVATION_BATCH_SIZE) {
-        let mut dry_run_account = managed_account.clone();
-        dry_run_account.utxos = batch
-            .iter()
-            .cloned()
-            .map(|utxo| (utxo.outpoint, utxo))
-            .collect();
-        let result = TransactionBuilder::new()
-            .set_fee_rate(FeeRate::new(0))
-            .set_current_height(current_height)
-            .set_selection_strategy(SelectionStrategy::All)
-            .set_special_payload(TransactionPayload::AssetLockPayloadType(
-                AssetLockPayload::new(vec![TxOut {
-                    value: 1,
-                    script_pubkey: ScriptBuf::new(),
-                }]),
-            ))
-            .set_funding(&mut dry_run_account, account)
-            .require_final_inputs()
-            .build_unsigned();
-        match result {
-            Ok((transaction, _)) => {
-                observed.extend(transaction.input.iter().filter_map(|input| {
-                    values
-                        .get(&input.previous_output)
-                        .map(|value| (input.previous_output, *value))
-                }));
-                dry_run_account.release_reservation(&transaction);
-            }
-            Err(BuilderError::CoinSelection(SelectionError::NoUtxosAvailable)) => {}
-            Err(source) => return Err(source),
-        }
-    }
-
-    Ok(AssetLockInputState::from_inputs(observed))
-}
-
-pub(super) fn asset_lock_final_input_state(
-    managed_account: &ManagedCoreFundsAccount,
-    account: &Account,
-    current_height: u32,
-) -> Result<AssetLockInputState, BuilderError> {
-    let _observation_guard = ASSET_LOCK_INPUT_OBSERVATION_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    observe_asset_lock_inputs_locked(managed_account, account, current_height)
-}
-
-fn try_asset_lock_final_input_state(
-    managed_account: &ManagedCoreFundsAccount,
-    account: &Account,
-    current_height: u32,
-) -> Result<Option<AssetLockInputState>, BuilderError> {
-    let Ok(_observation_guard) = ASSET_LOCK_INPUT_OBSERVATION_LOCK.try_lock() else {
-        return Ok(None);
-    };
-    observe_asset_lock_inputs_locked(managed_account, account, current_height).map(Some)
+) -> AssetLockInputState {
+    AssetLockInputState::from_inputs(utxos.into_iter().filter_map(|utxo| {
+        ((utxo.is_confirmed || utxo.is_instantlocked) && utxo.is_spendable(current_height))
+            .then_some((utxo.outpoint, utxo.value()))
+    }))
 }
 
 /// Map a finalized-or-pending upstream `TransactionContext` to DET's richer
@@ -523,7 +437,7 @@ fn address_paths_from_info(
 fn carried_forward_state(prior: &WalletSnapshot) -> SnapshotState {
     SnapshotState {
         balance: prior.balance,
-        asset_lock_inputs: prior.asset_lock_inputs.clone(),
+        asset_lock_inputs: None,
         utxos: prior.utxos.clone(),
         address_balances: prior.address_balances.clone(),
         monitored_receive_addresses: prior.monitored_receive_addresses.clone(),
@@ -652,12 +566,51 @@ impl SnapshotStore {
         &self,
         seed_hash: &WalletSeedHash,
     ) -> (u64, AssetLockInputState, u64) {
-        let snapshot = self.snapshot(seed_hash);
+        let mut generations = match self.generations.lock() {
+            Ok(generations) => generations,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let revision = generations.entry(*seed_hash).or_default();
         (
-            snapshot.generation,
-            snapshot.asset_lock_inputs.clone(),
-            snapshot.asset_lock_input_revision,
+            revision.generation,
+            revision.asset_lock_inputs.clone().unwrap_or_default(),
+            revision.asset_lock_input_revision,
         )
+    }
+
+    /// Publish reservation-aware selector inputs observed by a backend quote.
+    /// This is the authoritative validation state; display snapshots only
+    /// provide cheap UTXO-change invalidation and never run the builder.
+    pub(super) fn publish_asset_lock_inputs(
+        &self,
+        seed_hash: &WalletSeedHash,
+        inputs: AssetLockInputState,
+    ) -> u64 {
+        let mut generations = match self.generations.lock() {
+            Ok(generations) => generations,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let revision = generations.entry(*seed_hash).or_default();
+        revision.generation = revision.generation.saturating_add(1);
+        if revision.asset_lock_inputs.as_ref() != Some(&inputs) {
+            revision.asset_lock_input_revision =
+                revision.asset_lock_input_revision.saturating_add(1);
+            revision.asset_lock_inputs = Some(inputs);
+        }
+        revision.asset_lock_input_revision
+    }
+
+    /// Invalidate the validation state when a wallet operation may have changed
+    /// reservations without producing an SPV wallet event yet.
+    pub(super) fn invalidate_asset_lock_inputs(&self, seed_hash: &WalletSeedHash) {
+        let mut generations = match self.generations.lock() {
+            Ok(generations) => generations,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let revision = generations.entry(*seed_hash).or_default();
+        revision.generation = revision.generation.saturating_add(1);
+        revision.asset_lock_input_revision = revision.asset_lock_input_revision.saturating_add(1);
+        revision.asset_lock_inputs = None;
     }
 
     /// Whether a snapshot has been published for the wallet yet. `false`
@@ -800,7 +753,7 @@ impl SnapshotStore {
         // entire prior snapshot forward — balance included — so every field of
         // the published snapshot reflects one consistency point.
         let state = match wallet.try_state() {
-            Some(state) => (|| {
+            Some(state) => {
                 let core_balance = state.balance();
                 let current_height = state.last_processed_height();
                 let balance = DetWalletBalance {
@@ -808,22 +761,17 @@ impl SnapshotStore {
                     unconfirmed: core_balance.unconfirmed(),
                     total: core_balance.total(),
                 };
-                let asset_lock_inputs = match (
-                    state
-                        .wallet()
-                        .get_bip44_account(super::DEFAULT_BIP44_ACCOUNT),
-                    state
-                        .core_wallet
-                        .accounts
-                        .standard_bip44_accounts
-                        .get(&super::DEFAULT_BIP44_ACCOUNT),
-                ) {
-                    (Some(account), Some(managed_account)) => {
-                        try_asset_lock_final_input_state(managed_account, account, current_height)
-                            .ok()
-                            .flatten()?
-                    }
-                    _ => AssetLockInputState::default(),
+                let asset_lock_inputs = match state
+                    .core_wallet
+                    .accounts
+                    .standard_bip44_accounts
+                    .get(&super::DEFAULT_BIP44_ACCOUNT)
+                {
+                    Some(managed_account) => Some(asset_lock_final_unreserved_inputs(
+                        managed_account.utxos.values(),
+                        current_height,
+                    )),
+                    None => Some(AssetLockInputState::default()),
                 };
                 let mut utxos = Vec::new();
                 let mut address_balances: BTreeMap<Address, u64> = BTreeMap::new();
@@ -836,16 +784,15 @@ impl SnapshotStore {
                         address: u.address.clone(),
                     });
                 }
-                Some(SnapshotState {
+                SnapshotState {
                     balance,
                     asset_lock_inputs,
                     utxos,
                     address_balances,
                     monitored_receive_addresses: external_addresses_from_info(&state.core_wallet),
                     address_paths: address_paths_from_info(&state.core_wallet),
-                })
-            })()
-            .unwrap_or_else(|| carried_forward_state(&self.snapshot(&seed_hash))),
+                }
+            }
             // Accepted, self-healing edge case: if this is the very first
             // recompute for the wallet and it loses the try-lock, there is no
             // prior snapshot, so `snapshot()` returns the all-zero default and
@@ -872,24 +819,32 @@ impl SnapshotStore {
             .and_then(|log| log.get(wallet_id).map(|m| m.values().cloned().collect()))
             .unwrap_or_default();
 
-        let (generation, asset_lock_input_revision) = {
+        let generation = {
             let mut generations = match self.generations.lock() {
                 Ok(generations) => generations,
                 Err(poisoned) => poisoned.into_inner(),
             };
             let revision = generations.entry(*seed_hash).or_default();
             revision.generation = revision.generation.saturating_add(1);
-            if revision.asset_lock_inputs.as_ref() != Some(&state.asset_lock_inputs) {
-                revision.asset_lock_input_revision =
-                    revision.asset_lock_input_revision.saturating_add(1);
-                revision.asset_lock_inputs = Some(state.asset_lock_inputs.clone());
+            match &state.asset_lock_inputs {
+                Some(asset_lock_inputs)
+                    if revision.asset_lock_inputs.as_ref() != Some(asset_lock_inputs) =>
+                {
+                    revision.asset_lock_input_revision =
+                        revision.asset_lock_input_revision.saturating_add(1);
+                    revision.asset_lock_inputs = Some(asset_lock_inputs.clone());
+                }
+                Some(_) => {}
+                None => {
+                    revision.asset_lock_input_revision =
+                        revision.asset_lock_input_revision.saturating_add(1);
+                    revision.asset_lock_inputs = None;
+                }
             }
-            (revision.generation, revision.asset_lock_input_revision)
+            revision.generation
         };
         let snapshot = Arc::new(WalletSnapshot {
             generation,
-            asset_lock_inputs: state.asset_lock_inputs,
-            asset_lock_input_revision,
             balance: state.balance,
             transactions,
             utxos: state.utxos,
@@ -974,7 +929,7 @@ mod tests {
             &wid,
             SnapshotState {
                 balance: DetWalletBalance::default(),
-                asset_lock_inputs: AssetLockInputState::default(),
+                asset_lock_inputs: Some(AssetLockInputState::default()),
                 utxos: Vec::new(),
                 address_balances: BTreeMap::new(),
                 monitored_receive_addresses: Vec::new(),
@@ -988,7 +943,6 @@ mod tests {
         let store = SnapshotStore::new();
         let snap = store.snapshot(&seed(1));
         assert_eq!(snap.generation, 0);
-        assert_eq!(snap.asset_lock_inputs.final_funds_duffs, 0);
         assert_eq!(snap.balance, DetWalletBalance::default());
         assert!(snap.transactions.is_empty());
         assert!(snap.utxos.is_empty());
@@ -1020,7 +974,7 @@ mod tests {
                     unconfirmed: 1_000,
                     total: 1_000,
                 },
-                asset_lock_inputs: AssetLockInputState::default(),
+                asset_lock_inputs: Some(AssetLockInputState::default()),
                 utxos: Vec::new(),
                 address_balances: BTreeMap::new(),
                 monitored_receive_addresses: Vec::new(),
@@ -1041,10 +995,10 @@ mod tests {
                     unconfirmed: 0,
                     total: 1_000,
                 },
-                asset_lock_inputs: AssetLockInputState::from_inputs([(
+                asset_lock_inputs: Some(AssetLockInputState::from_inputs([(
                     OutPoint::new(Txid::from_byte_array([1; 32]), 0),
                     1_000,
-                )]),
+                )])),
                 utxos: Vec::new(),
                 address_balances: BTreeMap::new(),
                 monitored_receive_addresses: Vec::new(),
@@ -1072,10 +1026,10 @@ mod tests {
                     unconfirmed: 0,
                     total: 1_000,
                 },
-                asset_lock_inputs: AssetLockInputState::from_inputs([(
+                asset_lock_inputs: Some(AssetLockInputState::from_inputs([(
                     OutPoint::new(Txid::from_byte_array([2; 32]), 0),
                     1_000,
-                )]),
+                )])),
                 utxos: Vec::new(),
                 address_balances: BTreeMap::new(),
                 monitored_receive_addresses: Vec::new(),
@@ -1112,7 +1066,7 @@ mod tests {
             &wid(9),
             SnapshotState {
                 balance: DetWalletBalance::default(),
-                asset_lock_inputs: AssetLockInputState::default(),
+                asset_lock_inputs: Some(AssetLockInputState::default()),
                 utxos: Vec::new(),
                 address_balances: BTreeMap::new(),
                 monitored_receive_addresses: watched.clone(),
@@ -1301,98 +1255,33 @@ mod tests {
 
     #[test]
     fn asset_lock_input_revision_changes_when_an_eligible_utxo_is_reserved() {
-        use dash_sdk::dpp::dashcore::blockdata::transaction::special_transaction::TransactionPayload;
-        use dash_sdk::dpp::dashcore::blockdata::transaction::special_transaction::asset_lock::AssetLockPayload;
-        use dash_sdk::dpp::key_wallet::wallet::Wallet as UpstreamWallet;
-        use dash_sdk::dpp::key_wallet::wallet::initialization::WalletAccountCreationOptions;
-        use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::ManagedWalletInfo;
-        use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::coin_selection::SelectionStrategy;
-        use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::fee::FeeRate;
-        use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::transaction_builder::TransactionBuilder;
-
-        const CURRENT_HEIGHT: u32 = 200;
-        let wallet = UpstreamWallet::from_seed_bytes(
-            [0x51; 64],
-            Network::Testnet,
-            WalletAccountCreationOptions::Default,
-        )
-        .expect("upstream wallet");
-        let account = wallet.get_bip44_account(0).expect("BIP44 account");
-        let mut info = ManagedWalletInfo::from_wallet(&wallet, CURRENT_HEIGHT);
-        let managed_account = info
-            .accounts
-            .standard_bip44_accounts
-            .get_mut(&0)
-            .expect("managed account");
-        let funding_address = managed_account
-            .next_receive_address(Some(&account.account_xpub), true)
-            .expect("funding address");
-        let outpoint = OutPoint::new(Txid::from_byte_array([0x52; 32]), 0);
-        let mut utxo = Utxo::new(
-            outpoint,
-            TxOut {
-                value: 1_000_000,
-                script_pubkey: funding_address.script_pubkey(),
-            },
-            funding_address,
-            100,
-            false,
-        );
-        utxo.is_confirmed = true;
-        managed_account.utxos.insert(outpoint, utxo);
-
-        let before = asset_lock_final_input_state(managed_account, account, CURRENT_HEIGHT)
-            .expect("initial input observation");
+        let before = AssetLockInputState::from_inputs([(
+            OutPoint::new(Txid::from_byte_array([0x52; 32]), 0),
+            1_000_000,
+        )]);
         let store = SnapshotStore::new();
         store.publish(
             &seed(0x51),
             &wid(0x51),
             SnapshotState {
                 balance: DetWalletBalance::default(),
-                asset_lock_inputs: before,
+                asset_lock_inputs: Some(before),
                 utxos: Vec::new(),
                 address_balances: BTreeMap::new(),
                 monitored_receive_addresses: Vec::new(),
                 address_paths: BTreeMap::new(),
             },
         );
-        let initial_revision = store.snapshot(&seed(0x51)).asset_lock_input_revision;
+        let (_, _, initial_revision) = store.asset_lock_probe_snapshot(&seed(0x51));
 
-        let (reserved_tx, _) = TransactionBuilder::new()
-            .set_fee_rate(FeeRate::new(1_000))
-            .set_current_height(CURRENT_HEIGHT)
-            .set_selection_strategy(SelectionStrategy::All)
-            .set_special_payload(TransactionPayload::AssetLockPayloadType(
-                AssetLockPayload::new(vec![TxOut {
-                    value: 1,
-                    script_pubkey: ScriptBuf::new(),
-                }]),
-            ))
-            .set_funding(managed_account, account)
-            .require_final_inputs()
-            .build_unsigned()
-            .expect("reservation-producing build");
-
-        let after = asset_lock_final_input_state(managed_account, account, CURRENT_HEIGHT)
-            .expect("reservation-aware input observation");
-        assert_eq!(after.final_funds_duffs, 0);
-        store.publish(
-            &seed(0x51),
-            &wid(0x51),
-            SnapshotState {
-                balance: DetWalletBalance::default(),
-                asset_lock_inputs: after,
-                utxos: Vec::new(),
-                address_balances: BTreeMap::new(),
-                monitored_receive_addresses: Vec::new(),
-                address_paths: BTreeMap::new(),
-            },
-        );
+        store.invalidate_asset_lock_inputs(&seed(0x51));
+        let (_, invalidated_inputs, invalidated_revision) =
+            store.asset_lock_probe_snapshot(&seed(0x51));
         assert!(
-            store.snapshot(&seed(0x51)).asset_lock_input_revision > initial_revision,
-            "taking a live reservation must advance the display-side input revision"
+            invalidated_revision > initial_revision,
+            "a possible live reservation must invalidate cached validation state"
         );
-        managed_account.release_reservation(&reserved_tx);
+        assert_eq!(invalidated_inputs, AssetLockInputState::default());
     }
 
     /// Crosses the `send_screen` "Max" seam: the Max a Core send reserves must
@@ -1602,11 +1491,6 @@ mod tests {
         address_paths.insert(b.clone(), DerivationPath::from(Vec::new()));
         WalletSnapshot {
             generation: 1,
-            asset_lock_inputs: AssetLockInputState::from_inputs([(
-                OutPoint::new(Txid::from_byte_array([1; 32]), 0),
-                6_000,
-            )]),
-            asset_lock_input_revision: 1,
             balance: DetWalletBalance {
                 confirmed: 6_000,
                 unconfirmed: 0,
@@ -1930,10 +1814,10 @@ mod tests {
                     unconfirmed: 0,
                     total,
                 },
-                asset_lock_inputs: AssetLockInputState::from_inputs([(
+                asset_lock_inputs: Some(AssetLockInputState::from_inputs([(
                     OutPoint::new(Txid::from_byte_array([1; 32]), 0),
                     total,
-                )]),
+                )])),
                 utxos: Vec::new(),
                 address_balances: address_balances.clone(),
                 monitored_receive_addresses: Vec::new(),

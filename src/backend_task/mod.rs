@@ -658,6 +658,7 @@ pub enum BackendTaskSuccessResult {
         request_id: u64,
         amount_duffs: u64,
         observed_inputs: crate::wallet_backend::AssetLockInputState,
+        observed_input_revision: u64,
         is_partial: bool,
     },
     /// Platform address balances fetched from Platform
@@ -1339,6 +1340,7 @@ impl AppContext {
                     request_id,
                     amount_duffs: quote.amount_duffs,
                     observed_inputs: quote.observed_inputs,
+                    observed_input_revision: quote.observed_input_revision,
                     is_partial: quote.is_partial,
                 }),
             WalletTask::FetchPlatformAddressBalances { seed_hash } => {

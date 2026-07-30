@@ -32,7 +32,7 @@ use crate::ui::components::wallet_unlock_popup::{
     WalletUnlockPopup, WalletUnlockResult, try_open_wallet_no_password, wallet_needs_unlock,
 };
 use crate::ui::components::{BannerHandle, MessageBanner, OptionBannerExt};
-use crate::ui::state::AssetLockBalanceCache;
+use crate::ui::state::{AssetLockBalanceCache, ObservedAssetLockInputs};
 use crate::ui::theme::DashColors;
 use crate::ui::{
     MessageType, RootScreenType, ScreenLike, append_concurrent_backend_tasks,
@@ -635,9 +635,9 @@ impl WalletSendScreen {
     }
 
     fn asset_lock_max_amount(&self, seed_hash: &WalletSeedHash) -> Result<u64, String> {
-        let (_, input_state, _) = self.app_context.asset_lock_probe_snapshot(seed_hash);
+        let (_, input_state, revision) = self.app_context.asset_lock_probe_snapshot(seed_hash);
         self.asset_lock_balance
-            .get_current(seed_hash, &input_state)
+            .get_current(seed_hash, &input_state, revision)
             .ok_or_else(|| {
                 self.asset_lock_balance
                     .validation_unavailable_message(seed_hash)
@@ -3341,7 +3341,7 @@ impl WalletSendScreen {
             snapshot_generation,
             request_id,
             amount_duffs,
-            input_state,
+            ObservedAssetLockInputs::new(input_state, utxo_revision),
             false,
         );
     }
@@ -4385,6 +4385,7 @@ impl ScreenLike for WalletSendScreen {
             request_id,
             amount_duffs,
             observed_inputs,
+            observed_input_revision,
             is_partial,
         } = &backend_task_success_result
         {
@@ -4393,7 +4394,7 @@ impl ScreenLike for WalletSendScreen {
                 *snapshot_generation,
                 *request_id,
                 *amount_duffs,
-                observed_inputs.clone(),
+                ObservedAssetLockInputs::new(observed_inputs.clone(), *observed_input_revision),
                 *is_partial,
             );
             return;
@@ -4718,7 +4719,7 @@ mod tests {
             snapshot_generation,
             request_id,
             BUILDER_MAX_DUFFS,
-            final_funds_duffs,
+            ObservedAssetLockInputs::new(final_funds_duffs, utxo_revision),
             false,
         );
         screen.selected_source = Some(SourceSelection::CoreWallet);
@@ -4874,7 +4875,7 @@ mod tests {
             7,
             request_id,
             STALE_MAX_DUFFS,
-            stale_inputs,
+            ObservedAssetLockInputs::new(stale_inputs, 1),
             false,
         );
         screen.selected_source = Some(SourceSelection::CoreWallet);

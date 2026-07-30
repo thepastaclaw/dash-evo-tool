@@ -26,7 +26,6 @@ use dash_sdk::dpp::key_wallet::wallet::managed_wallet_info::transaction_builder:
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::snapshot::asset_lock_final_input_state;
 use super::{
     AssetLockInputState, DEFAULT_BIP44_ACCOUNT, DetSigner, SecretPlaintext, WalletBackend,
 };
@@ -35,6 +34,7 @@ use super::{
 // cannot reuse the real path's source.
 // TODO(upstream): export that default or expose an asset-lock ceiling quote primitive.
 const ASSET_LOCK_FEE_PER_KB: u64 = 1_000;
+const ASSET_LOCK_INPUT_OBSERVATION_BATCH_SIZE: usize = 500;
 /// Bounds how long the quote search may retain exclusive wallet access.
 const ASSET_LOCK_PROBE_LOCK_HOLD_DEADLINE: Duration = Duration::from_secs(5);
 const MAX_DRAIN_SEARCH_DOUBLINGS: u32 = 40;
@@ -60,6 +60,8 @@ pub struct AssetLockMaxAmountQuote {
     pub amount_duffs: u64,
     /// Final, unreserved inputs visible to the builder under the wallet lock.
     pub observed_inputs: AssetLockInputState,
+    /// Validation-state revision assigned to `observed_inputs`.
+    pub observed_input_revision: u64,
     /// Whether the deadline stopped the search before the exact maximum was found.
     pub is_partial: bool,
 }
@@ -121,6 +123,62 @@ fn dry_run_asset_lock_amount(
         amount_duffs,
         None,
     )
+}
+
+fn observe_asset_lock_inputs(
+    managed_account: &ManagedCoreFundsAccount,
+    account: &Account,
+    current_height: u32,
+) -> Result<AssetLockInputState, BuilderError> {
+    let candidates: Vec<_> = managed_account
+        .utxos
+        .values()
+        .filter(|utxo| {
+            (utxo.is_confirmed || utxo.is_instantlocked) && utxo.is_spendable(current_height)
+        })
+        .cloned()
+        .collect();
+    let values: std::collections::BTreeMap<_, _> = candidates
+        .iter()
+        .map(|utxo| (utxo.outpoint, utxo.value()))
+        .collect();
+    let mut observed = Vec::with_capacity(candidates.len());
+
+    for batch in candidates.chunks(ASSET_LOCK_INPUT_OBSERVATION_BATCH_SIZE) {
+        let mut dry_run_account = managed_account.clone();
+        dry_run_account.utxos = batch
+            .iter()
+            .cloned()
+            .map(|utxo| (utxo.outpoint, utxo))
+            .collect();
+        let result = TransactionBuilder::new()
+            .set_fee_rate(FeeRate::new(0))
+            .set_current_height(current_height)
+            .set_selection_strategy(SelectionStrategy::All)
+            .set_special_payload(TransactionPayload::AssetLockPayloadType(
+                AssetLockPayload::new(vec![TxOut {
+                    value: 1,
+                    script_pubkey: ScriptBuf::new(),
+                }]),
+            ))
+            .set_funding(&mut dry_run_account, account)
+            .require_final_inputs()
+            .build_unsigned();
+        match result {
+            Ok((transaction, _)) => {
+                observed.extend(transaction.input.iter().filter_map(|input| {
+                    values
+                        .get(&input.previous_output)
+                        .map(|value| (input.previous_output, *value))
+                }));
+                dry_run_account.release_reservation(&transaction);
+            }
+            Err(BuilderError::CoinSelection(SelectionError::NoUtxosAvailable)) => {}
+            Err(source) => return Err(source),
+        }
+    }
+
+    Ok(AssetLockInputState::from_inputs(observed))
 }
 
 // INTENTIONAL(upstream-bnb-dos): default `BranchAndBound` is algorithmically
@@ -554,6 +612,8 @@ impl WalletBackend {
         // Keep them all under the same exclusive boundary as real builds.
         let wallet_manager = Arc::clone(wallet.wallet_manager()).write_owned().await;
         let deadline = ProbeDeadline::after(timeout);
+        let snapshots = Arc::clone(&self.inner.snapshots);
+        let seed_hash_for_probe = *seed_hash;
         let (managed_account, account, current_height) = {
             let (key_wallet, info) = wallet_manager
                 .get_wallet_and_info(&wallet_id)
@@ -574,21 +634,30 @@ impl WalletBackend {
         };
 
         tokio::task::spawn_blocking(move || {
-            let observed_inputs =
-                asset_lock_final_input_state(&managed_account, &account, current_height)?;
-            let amount_duffs = asset_lock_max_amount_from_account_until(
-                &managed_account,
-                &account,
-                current_height,
-                &deadline,
-            )?;
-            let is_partial = deadline.timed_out();
+            let result = (|| {
+                let observed_inputs =
+                    observe_asset_lock_inputs(&managed_account, &account, current_height)?;
+                let amount_duffs = asset_lock_max_amount_from_account_until(
+                    &managed_account,
+                    &account,
+                    current_height,
+                    &deadline,
+                )?;
+                let observed_input_revision = snapshots
+                    .publish_asset_lock_inputs(&seed_hash_for_probe, observed_inputs.clone());
+                let is_partial = deadline.timed_out();
+                Ok(AssetLockMaxAmountQuote {
+                    amount_duffs,
+                    observed_inputs,
+                    observed_input_revision,
+                    is_partial,
+                })
+            })();
+            if result.is_err() {
+                snapshots.invalidate_asset_lock_inputs(&seed_hash_for_probe);
+            }
             drop(wallet_manager);
-            Ok(AssetLockMaxAmountQuote {
-                amount_duffs,
-                observed_inputs,
-                is_partial,
-            })
+            result
         })
         .await?
         .map_err(|source| TaskError::AssetLockBalanceQueryFailed {
@@ -677,6 +746,7 @@ impl WalletBackend {
                 let signer = DetSigner::from_held(session.plaintext(), self.inner.network);
                 let wallet = self.resolve_wallet(seed_hash).await?;
                 let wallet_id = wallet.wallet_id();
+                self.inner.snapshots.invalidate_asset_lock_inputs(seed_hash);
 
                 // Assemble and sign under one uninterrupted hold of the
                 // wallet-manager write lock: `set_funding` reads the funding
@@ -827,6 +897,7 @@ impl WalletBackend {
                 }
                 let signer = DetSigner::from_held(session.plaintext(), self.inner.network);
                 let wallet = self.resolve_wallet(seed_hash).await?;
+                self.inner.snapshots.invalidate_asset_lock_inputs(seed_hash);
                 let (proof, credit_output_path, out_point) = wallet
                     .asset_locks()
                     .create_funded_asset_lock_proof(

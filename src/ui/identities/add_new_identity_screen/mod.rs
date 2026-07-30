@@ -31,7 +31,7 @@ use crate::ui::identities::funding_common::{
     funding_method_after_switch, max_amount_after_fee_reserve, receive_deposit_ceiling_duffs,
     spendable_covers_minimum, step_after_task_failure, wallet_selection_combo,
 };
-use crate::ui::state::{AssetLockBalanceCache, TrackedAssetLockCache};
+use crate::ui::state::{AssetLockBalanceCache, ObservedAssetLockInputs, TrackedAssetLockCache};
 use crate::ui::theme::DashColors;
 use crate::ui::{
     MessageType, ScreenLike, append_concurrent_backend_tasks, can_append_concurrent_backend_tasks,
@@ -506,10 +506,10 @@ impl AddNewIdentityScreen {
             .as_ref()
             .and_then(|wallet| wallet.read().ok())
             .map(|wallet| wallet.seed_hash())?;
-        let (_, input_state, _) = self.app_context.asset_lock_probe_snapshot(&seed_hash);
-        let wallet_ceiling_duffs = self
-            .asset_lock_balance
-            .get_current(&seed_hash, &input_state)?;
+        let (_, input_state, revision) = self.app_context.asset_lock_probe_snapshot(&seed_hash);
+        let wallet_ceiling_duffs =
+            self.asset_lock_balance
+                .get_current(&seed_hash, &input_state, revision)?;
 
         match funding_method {
             FundingMethod::UseWalletBalance => Some(wallet_ceiling_duffs),
@@ -1477,6 +1477,7 @@ impl ScreenLike for AddNewIdentityScreen {
                 request_id,
                 amount_duffs,
                 observed_inputs,
+                observed_input_revision,
                 is_partial,
             } => {
                 self.asset_lock_balance.store(
@@ -1484,7 +1485,7 @@ impl ScreenLike for AddNewIdentityScreen {
                     *snapshot_generation,
                     *request_id,
                     *amount_duffs,
-                    observed_inputs.clone(),
+                    ObservedAssetLockInputs::new(observed_inputs.clone(), *observed_input_revision),
                     *is_partial,
                 );
                 return;
@@ -2037,7 +2038,7 @@ mod funding_method_tests {
             generation,
             request_id,
             WALLET_CEILING_DUFFS,
-            final_funds,
+            ObservedAssetLockInputs::new(final_funds, revision),
             false,
         );
 
@@ -2060,9 +2061,14 @@ mod funding_method_tests {
             current_final_funds,
             current_revision,
         ));
-        screen
-            .asset_lock_balance
-            .store(seed_hash, 7, request_id, 10_000_000, stale_inputs, false);
+        screen.asset_lock_balance.store(
+            seed_hash,
+            7,
+            request_id,
+            10_000_000,
+            ObservedAssetLockInputs::new(stale_inputs, 1),
+            false,
+        );
 
         assert!(matches!(
             screen.register_identity_clicked(FundingMethod::UseWalletBalance),
@@ -2150,7 +2156,7 @@ mod funding_method_tests {
             7,
             request_id,
             900,
-            AssetLockInputState::default(),
+            ObservedAssetLockInputs::new(AssetLockInputState::default(), 1),
             false,
         );
 
@@ -2175,7 +2181,7 @@ mod funding_method_tests {
             8,
             request_id,
             800,
-            AssetLockInputState::default(),
+            ObservedAssetLockInputs::new(AssetLockInputState::default(), 1),
             false,
         );
         screen.refresh_on_arrival();
@@ -2192,7 +2198,7 @@ mod funding_method_tests {
             9,
             request_id,
             700,
-            AssetLockInputState::default(),
+            ObservedAssetLockInputs::new(AssetLockInputState::default(), 1),
             false,
         );
         screen.refresh();

@@ -15,6 +15,6 @@ pub mod legacy_recovery;
 pub mod masternodes_view;
 pub mod tracked_asset_lock_cache;
 
-pub use asset_lock_balance::AssetLockBalanceCache;
+pub use asset_lock_balance::{AssetLockBalanceCache, ObservedAssetLockInputs};
 pub use avatar_cache::AvatarCache;
 pub use tracked_asset_lock_cache::TrackedAssetLockCache;
